@@ -1,0 +1,21 @@
+# go.sum is deliberately NOT ignored. A library must commit it: without it,
+# `go build` fails for anyone who clones the repo, and module checksums cannot be
+# verified. It was previously listed here, which left the repository unbuildable
+# from a fresh clone.
+
+# Test and profiling artifacts. `go test` leaves the compiled binary behind
+# whenever a -cpuprofile / -memprofile flag is used.
+*.test
+*.out
+*.prof
+
+# Generated knowledge-graph output: 4 MB of regenerable artifacts, plus state
+# holding absolute paths to one machine's Python install. GRAPH_REPORT.md is the
+# exception — it is small, human-readable, and worth reviewing in a diff.
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
