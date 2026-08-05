@@ -20,6 +20,26 @@ the abstraction holds.
 
 ### Added
 
+- **`examples/gpoolproxy`, a PostgreSQL pooler built on the engine.** An in-process
+  pool cannot bound connections across applications — forty services holding
+  twenty-five each still open a thousand, and none of them can see the others.
+  Closing that gap needs a process rather than a library, so it is an example in
+  its own module rather than anything a consumer of gpool downloads.
+
+  It is also the strongest evidence that `pkg/pooling` is not shaped around pgx:
+  the proxy drives `Core` with a connection type that is not a database driver at
+  all, just a socket and a transaction status, and the whole vendor half is five
+  methods. Twelve independent client pools with five connections each are held to
+  four PostgreSQL backends.
+
+  Measured against PgBouncer 1.25.2 at matched pool size, PgBouncer is ahead to
+  about thirty clients and behind past it — 32,001 against 55,055 queries per
+  second at 128 clients, 28,989 against 61,565 at 512. The cause is structural
+  rather than incidental: PgBouncer runs one thread, so one core is its ceiling
+  on any hardware, while the proxy was measured at 120% of a core under the same
+  load. Per query PgBouncer remains the cheaper of the two, at roughly 12 µs of
+  CPU against 20 µs.
+
 - **Four new databases**, each as its own Go module so a consumer downloads only
   the drivers it uses. The core resolves 20 modules; ClickHouse alone brings 89.
   - `vendors/mysql` — MySQL and MariaDB. MariaDB speaks the MySQL wire protocol,
