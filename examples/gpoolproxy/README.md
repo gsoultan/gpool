@@ -53,52 +53,78 @@ postgres://app:secret@proxy:6432/postgres?default_query_exec_mode=exec
 ## Measured against PgBouncer
 
 PgBouncer 1.25.2 and gpoolproxy, both in containers on one podman network, both
-pooling **16** server connections in transaction mode against the same
-PostgreSQL 17. The load generator runs in the same network, so neither proxy is
-measured across a different path than the other. Host: Apple M5 Pro, 7 CPUs
-visible to the VM, shared with the generator. Two runs of 60,000 queries each,
-averaged.
+in **transaction mode**, both pooling **16** server connections, both accepting
+**3,000 client connections**, against the same PostgreSQL 17. Verified from
+PgBouncer's own admin console:
+
+```
+pool_mode|transaction    max_client_conn|3000    default_pool_size|16
+```
+
+The load generator runs in the same network, so neither proxy is measured across
+a different path than the other. Host: Apple M5 Pro, 7 CPUs visible to the VM and
+shared with the generator. Median of three runs of 40,000 queries.
+
+The three targets are interleaved at each concurrency rather than swept one at a
+time. Sweeping a target to completion before starting the next lets drift in the
+machine land entirely on whichever target held the slot and be read as a
+difference between them — an earlier run of this benchmark reported PgBouncer at
+both 4,798 and 2,705 queries per second for the same case that way.
 
 Throughput, queries per second:
 
 | clients | direct to PostgreSQL | PgBouncer 1.25.2 | gpoolproxy | ratio |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 11,342 | 4,798 | 4,664 | 0.97× |
-| 8 | 50,058 | 27,004 | 23,830 | 0.88× |
-| 32 | 120,247 | 35,390 | 43,385 | 1.23× |
-| 128 | 122,591 | 32,001 | 55,055 | **1.72×** |
-| 512 | *cannot connect* | 28,989 | 61,565 | **2.12×** |
+| 1 | 11,431 | 4,256 | 4,749 | 1.12× |
+| 8 | 52,864 | 26,854 | 23,239 | 0.87× |
+| 32 | 115,960 | 34,698 | 51,792 | 1.49× |
+| 128 | 116,002 | 31,046 | 58,532 | 1.89× |
+| 512 | *exceeds max_connections* | 31,891 | 53,368 | 1.67× |
+| 1024 | — | 29,079 | 54,226 | 1.86× |
+| 2048 | — | 27,517 | 52,836 | 1.92× |
+| 3000 | — | 26,973 | 50,742 | 1.88× |
 
-Three things in that table are worth more than the headline.
+Cost at the top of that table, with all 3,000 clients connected and querying:
 
-**PgBouncer is faster when there is little to do.** At one and eight clients it
-wins. C and a tight event loop cost less per query than Go does, and measured at
-the plateau PgBouncer spends about 12 µs of CPU per query against gpoolproxy's
-20 µs. Nothing here makes gpoolproxy more efficient; it is not.
+| | PgBouncer | gpoolproxy |
+| :--- | ---: | ---: |
+| resident memory | **18.4 MiB** | 107.2 MiB |
+| per client connection | **6 KiB** | 37 KiB |
+| CPU, steady state | **40% of one core** | 140% of one core |
+| CPU per query | **14.8 µs** | 27.6 µs |
+| threads | 1 | 21 |
 
-**The crossover is concurrency, and the cause is structural.** Under identical
-128-client load:
+Four things there are worth more than the headline.
 
-```
-pgbouncer  Threads: 1     40% of one core     32,001 q/s
-gpoolproxy Threads: 21   120% of one core     55,055 q/s
-```
+**PgBouncer is the more efficient of the two, and it is not close.** It serves a
+query for roughly half the CPU and holds a client for a sixth of the memory. C
+and a tight event loop beat Go and a pair of goroutines per session. Nothing in
+this example changes that, and a deployment that is memory-bound rather than
+throughput-bound should prefer PgBouncer on these numbers.
 
-PgBouncer is a single thread. That is not a tuning choice — it is a ceiling of
-one core, on any hardware, forever. gpoolproxy was measured *above* that ceiling,
-which is the whole difference. PgBouncer's own answer is `so_reuseport`: run
-several PgBouncer processes, each with its own separate pool. That works, and it
-means the pool sizes no longer add up to what you configured.
+**What it cannot do is use a second core.** PgBouncer is one thread — measured,
+not inferred — so one core is its ceiling on any hardware, forever. gpoolproxy
+was measured at 140% of a core under the same load, which is simply not a number
+a single thread can produce. That, and only that, is where the throughput
+difference comes from. Note that PgBouncer was *not* saturated at 40%, so its
+decline is event-loop serialisation rather than raw CPU exhaustion in this
+environment; the one-core ceiling is the durable limit, not this particular
+number.
 
-**Past 128 clients PgBouncer declines and gpoolproxy still climbs** — 35,390 →
-28,989 against 43,385 → 61,565. And the direct column simply stops: 512 clients
-exceed `max_connections`, which is the entire reason to run a pooler at all.
+**The shapes differ past the peak.** PgBouncer peaks at 32 clients and falls 22%
+from there to 3,000. gpoolproxy peaks at 128 and falls 13%. Both degrade under
+three thousand clients; one degrades less.
+
+**PgBouncer's own answer to the single core is `so_reuseport`** — run several
+PgBouncer processes behind one port. That works, and it means each has its own
+pool, so `default_pool_size` no longer describes what reaches the database.
 
 Reproduce with:
 
 ```bash
 DATABASE_URL=… PGBOUNCER_URL=… PROXY_URL=… \
-  go test -bench=Throughput -benchtime=60000x -count=2
+  GPOOL_BENCH_CLIENTS=1,8,32,128,512,1024,2048,3000 \
+  go test -bench=Throughput -benchtime=40000x -count=3
 ```
 
 Any target whose URL is unset is skipped, so a partial comparison still runs.

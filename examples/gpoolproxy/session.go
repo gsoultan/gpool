@@ -75,8 +75,8 @@ func newSession(proxy *Proxy, conn net.Conn, key cancelKey) *session {
 	return &session{
 		proxy:  proxy,
 		conn:   conn,
-		reader: bufio.NewReaderSize(conn, relayBufSize),
-		writer: bufio.NewWriterSize(conn, relayBufSize),
+		reader: bufio.NewReaderSize(conn, clientBufSize),
+		writer: bufio.NewWriterSize(conn, clientBufSize),
 		key:    key,
 		attach: make(chan *backend, 1),
 		ctx:    ctx,

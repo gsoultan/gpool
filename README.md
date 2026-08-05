@@ -428,22 +428,24 @@ product, and its tests prove the property:
 60 client connections across 12 applications ran on at most 4 PostgreSQL backends
 ```
 
-Measured against PgBouncer 1.25.2, both pooling 16 server connections in
-transaction mode against the same PostgreSQL, queries per second:
+Measured against PgBouncer 1.25.2 — both in transaction mode, both pooling 16
+server connections, both accepting 3,000 clients, same PostgreSQL, load
+generator on the same network, median of three interleaved runs:
 
 | clients | direct | PgBouncer | gpoolproxy |
 | ---: | ---: | ---: | ---: |
-| 8 | 50,058 | 27,004 | 23,830 |
-| 32 | 120,247 | 35,390 | 43,385 |
-| 128 | 122,591 | 32,001 | **55,055** |
-| 512 | *exceeds max_connections* | 28,989 | **61,565** |
+| 8 | 52,864 | 26,854 | 23,239 |
+| 32 | 115,960 | 34,698 | 51,792 |
+| 128 | 116,002 | 31,046 | **58,532** |
+| 1024 | *exceeds max_connections* | 29,079 | **54,226** |
+| 3000 | — | 26,973 | **50,742** |
 
-PgBouncer is the faster of the two when there is little to do — C and a tight
-event loop cost about 12 µs of CPU per query against gpoolproxy's 20 µs. What it
-cannot do is use a second core: it runs one thread, measured, so its ceiling is
-one core on any hardware. Under identical 128-client load gpoolproxy was measured
-at 120% of a core, above that ceiling. See `examples/gpoolproxy/README.md` for
-the method and the caveats.
+PgBouncer is the more efficient of the two and it is not close — roughly half the
+CPU per query, and 6 KiB per client against 37 KiB. What it cannot do is use a
+second core: it runs one thread, so one core is its ceiling on any hardware,
+while gpoolproxy was measured at 140% of a core under the same load. That is the
+whole of the throughput difference. See `examples/gpoolproxy/README.md` for the
+method and the caveats.
 
 ## 🐬 MySQL and MariaDB
 

@@ -125,12 +125,12 @@ func TestProxyRelaysLargeResults(t *testing.T) {
 	var total, size int
 	err := conn.QueryRow(t.Context(),
 		"SELECT count(*), max(length(payload)) FROM (SELECT repeat('x', $1::int) AS payload FROM generate_series(1, 500)) s",
-		relayBufSize*2).Scan(&total, &size)
+		relayChunk*40).Scan(&total, &size)
 	if err != nil {
 		t.Fatalf("QueryRow() = %v", err)
 	}
-	if total != 500 || size != relayBufSize*2 {
-		t.Errorf("got %d rows of %d bytes, want 500 of %d", total, size, relayBufSize*2)
+	if total != 500 || size != relayChunk*40 {
+		t.Errorf("got %d rows of %d bytes, want 500 of %d", total, size, relayChunk*40)
 	}
 }
 

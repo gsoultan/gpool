@@ -32,13 +32,18 @@ the abstraction holds.
   methods. Twelve independent client pools with five connections each are held to
   four PostgreSQL backends.
 
-  Measured against PgBouncer 1.25.2 at matched pool size, PgBouncer is ahead to
-  about thirty clients and behind past it — 32,001 against 55,055 queries per
-  second at 128 clients, 28,989 against 61,565 at 512. The cause is structural
-  rather than incidental: PgBouncer runs one thread, so one core is its ceiling
-  on any hardware, while the proxy was measured at 120% of a core under the same
-  load. Per query PgBouncer remains the cheaper of the two, at roughly 12 µs of
-  CPU against 20 µs.
+  Measured against PgBouncer 1.25.2 in transaction mode, both pooling 16 server
+  connections and accepting 3,000 clients, medians of three interleaved runs:
+  PgBouncer is ahead to about thirty clients and behind past it — 31,046 against
+  58,532 queries per second at 128 clients, 26,973 against 50,742 at 3,000, where
+  a direct connection cannot reach at all. The cause is structural rather than
+  incidental: PgBouncer runs one thread, so one core is its ceiling on any
+  hardware, while the proxy was measured at 140% of a core under the same load.
+
+  PgBouncer is otherwise the more efficient of the two by a wide margin — roughly
+  half the CPU per query (14.8 µs against 27.6 µs) and a sixth of the memory per
+  client (6 KiB against 37 KiB). A memory-bound deployment should prefer it on
+  these numbers.
 
 - **Four new databases**, each as its own Go module so a consumer downloads only
   the drivers it uses. The core resolves 20 modules; ClickHouse alone brings 89.

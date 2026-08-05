@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,16 +40,44 @@ var benchTargets = []struct {
 // query, so at one client they can only look alike; what separates a
 // single-threaded event loop from one that uses every core is what happens when
 // the clients arrive together.
-var clientCounts = []int{1, 8, 32, 128, 512}
+var clientCounts = clientSweep()
+
+// clientSweep reads the sweep from GPOOL_BENCH_CLIENTS so a run can be retargeted
+// without a rebuild, which matters when the binary is cross-compiled into a
+// container to keep it on the same network as the proxies it measures.
+func clientSweep() []int {
+	setting := os.Getenv("GPOOL_BENCH_CLIENTS")
+	if setting == "" {
+		return []int{1, 8, 32, 128, 512}
+	}
+
+	var counts []int
+	for field := range strings.SplitSeq(setting, ",") {
+		count, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || count < 1 {
+			panic("GPOOL_BENCH_CLIENTS must be a comma-separated list of positive integers, got " + setting)
+		}
+		counts = append(counts, count)
+	}
+	return counts
+}
 
 func BenchmarkThroughput(b *testing.B) {
-	for _, target := range benchTargets {
-		url := os.Getenv(target.env)
-		if url == "" {
-			continue
-		}
-		for _, clients := range clientCounts {
-			b.Run(fmt.Sprintf("%s/clients=%d", target.name, clients), func(b *testing.B) {
+	// Client count outside, target inside, so the three targets at a given
+	// concurrency run next to each other in time.
+	//
+	// The order matters more than it looks. Sweeping one target to completion
+	// before starting the next lets any drift in the machine — thermal, noisy
+	// neighbour, page cache — land entirely on whichever target held the slot,
+	// and be read as a difference between them. Interleaving spreads it across
+	// all three.
+	for _, clients := range clientCounts {
+		for _, target := range benchTargets {
+			url := os.Getenv(target.env)
+			if url == "" {
+				continue
+			}
+			b.Run(fmt.Sprintf("clients=%d/%s", clients, target.name), func(b *testing.B) {
 				benchmarkTarget(b, url, clients)
 			})
 		}
