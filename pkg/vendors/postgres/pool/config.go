@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/gsoultan/gpool/pkg/pooling"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -169,6 +170,19 @@ func (c Config) validate() error {
 		return fmt.Errorf("%w: MinConns (%d) must not exceed MaxConns (%d)", ErrInvalidConfig, c.MinConns, c.MaxConns)
 	}
 	return nil
+}
+
+// pooling projects the vendor-facing config onto the engine's.
+func (c Config) pooling() pooling.Config {
+	return pooling.Config{
+		MaxConns:          c.MaxConns,
+		MinConns:          c.MinConns,
+		MaxConnIdleTime:   c.MaxConnIdleTime,
+		MaxConnLifetime:   c.MaxConnLifetime,
+		HealthCheckPeriod: c.HealthCheckPeriod,
+		CleanupTimeout:    c.ResetQueryTimeout,
+		ConnectTimeout:    c.ConnectTimeout,
+	}
 }
 
 // parse resolves the connection string once, up front. pgx.Connect re-parses on

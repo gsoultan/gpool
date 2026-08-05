@@ -62,6 +62,19 @@ the abstraction holds.
 
 ### Changed
 
+- **PostgreSQL now runs on the shared pooling engine.** It had its own copy of
+  capacity, sharding, the reaper, the clock and the statistics — around 1,270
+  lines that had already required the same `MaxConns` ceiling bug to be fixed
+  twice. What remains in the vendor is what is genuinely PostgreSQL-specific:
+  dialling pgx, judging a connection without I/O, and cleaning one up.
+
+  Retargeting is performance-neutral, but only after two costs the benchmarks
+  exposed. The engine was building a deadline context on every release to bound
+  cleanup — four allocations and a runtime timer, which took the acquire path from
+  198 to 889 ns/op; `Driver.NeedsCleanup` now lets a connection with nothing on it
+  skip it. And `Handle` is returned by value so a vendor stores it inline and pays
+  one allocation for the pair rather than two. Final: 200-217 ns/op against 198.3
+  before, one allocation either way.
 - **PostgreSQL is no longer the only vendor**, which resolves the corresponding
   entry under v0.1.0's known limitations. The abstraction has now been proven
   against three further engines, including one — ClickHouse — that is not

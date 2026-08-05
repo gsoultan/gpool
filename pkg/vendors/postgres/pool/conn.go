@@ -4,9 +4,9 @@ package pool
 
 import (
 	"context"
-	"sync/atomic"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/gpool/pkg/pooling"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -15,34 +15,36 @@ import (
 // One wrapper is allocated per acquisition and is never recycled. That is
 // deliberate: the wrapper's lifetime is controlled by user code, so pooling it
 // would let a second Release from one goroutine hand a live connection back to the
-// pool while another goroutine is still using it. A three-word allocation is
-// immaterial next to the network round trip it fronts.
+// pool while another goroutine is still using it.
 type connWrapper struct {
-	pool     *Postgres
-	idle     *idleConn
-	conn     *pgx.Conn
-	shardIdx int
-	released atomic.Bool
+	handle pooling.Handle[*pgConn]
 }
 
 var _ gpool.Conn = (*connWrapper)(nil)
 
-func newConnWrapper(p *Postgres, ic *idleConn, shardIdx int) *connWrapper {
-	return &connWrapper{pool: p, idle: ic, conn: ic.conn, shardIdx: shardIdx}
+func newConnWrapper(handle pooling.Handle[*pgConn]) *connWrapper {
+	return &connWrapper{handle: handle}
+}
+
+// conn returns the underlying pooled connection and its vendor state.
+func (c *connWrapper) conn() *pgConn {
+	return c.handle.Conn()
+}
+
+// pgx returns the driver connection.
+func (c *connWrapper) pgx() *pgx.Conn {
+	return c.handle.Conn().conn
 }
 
 // Release returns the connection to the pool. It is idempotent; releasing twice is
 // a no-op rather than a double return that would corrupt pool accounting.
 func (c *connWrapper) Release() {
-	if !c.released.CompareAndSwap(false, true) {
-		return
-	}
-	c.pool.release(c.idle, c.shardIdx)
+	c.handle.Release()
 }
 
 // live reports whether the connection may still be used.
 func (c *connWrapper) live() error {
-	if c.released.Load() {
+	if c.handle.Released() {
 		return ErrConnReleased
 	}
 	return nil
@@ -54,7 +56,7 @@ func (c *connWrapper) Exec(ctx context.Context, sql string, args ...any) (gpool.
 		return nil, err
 	}
 
-	tag, err := c.conn.Exec(ctx, sql, args...)
+	tag, err := c.pgx().Exec(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +70,7 @@ func (c *connWrapper) Query(ctx context.Context, sql string, args ...any) (gpool
 		return nil, err
 	}
 
-	rows, err := c.conn.Query(ctx, sql, args...)
+	rows, err := c.pgx().Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +83,7 @@ func (c *connWrapper) QueryRow(ctx context.Context, sql string, args ...any) gpo
 		return errorRow{err: err}
 	}
 
-	rows, err := c.conn.Query(ctx, sql, args...)
+	rows, err := c.pgx().Query(ctx, sql, args...)
 	if err != nil {
 		closeRows(rows)
 		return errorRow{err: err}
@@ -104,7 +106,7 @@ func (c *connWrapper) Begin(ctx context.Context) (gpool.Tx, error) {
 		return nil, err
 	}
 
-	tx, err := c.conn.Begin(ctx)
+	tx, err := c.pgx().Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -116,5 +118,5 @@ func (c *connWrapper) Ping(ctx context.Context) error {
 	if err := c.live(); err != nil {
 		return err
 	}
-	return c.conn.Ping(ctx)
+	return c.pgx().Ping(ctx)
 }

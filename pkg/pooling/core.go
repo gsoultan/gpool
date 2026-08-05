@@ -99,25 +99,25 @@ func (c *Core[C]) Config() Config {
 
 // Acquire checks out a connection, blocking until one is available, the context
 // is cancelled, or the pool is closed. The caller must Release the handle.
-func (c *Core[C]) Acquire(ctx context.Context) (*Handle[C], error) {
+func (c *Core[C]) Acquire(ctx context.Context) (Handle[C], error) {
 	if c.closed.Load() {
-		return nil, ErrClosed
+		return Handle[C]{}, ErrClosed
 	}
 	if err := c.acquirePermit(ctx); err != nil {
-		return nil, err
+		return Handle[C]{}, err
 	}
 	// Close may have run while this caller was queued for a permit.
 	if c.closed.Load() {
 		c.permits.release()
-		return nil, ErrClosed
+		return Handle[C]{}, ErrClosed
 	}
 
 	ic, idx, err := c.take(ctx)
 	if err != nil {
 		c.permits.release()
-		return nil, err
+		return Handle[C]{}, err
 	}
-	return &Handle[C]{core: c, idle: ic, conn: ic.conn, shardIdx: idx}, nil
+	return Handle[C]{core: c, idle: ic, conn: ic.conn, shardIdx: idx}, nil
 }
 
 // take returns a connection for a caller that already holds a permit, either by
@@ -242,11 +242,16 @@ func (c *Core[C]) recyclable(ic *idleConn[C]) bool {
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(c.bgCtx, c.config.CleanupTimeout)
-	defer cancel()
+	// Building a deadline context costs four allocations and a runtime timer, so
+	// a connection returned with nothing left on it pays none of it.
+	if c.driver.NeedsCleanup(ic.conn) {
+		ctx, cancel := context.WithTimeout(c.bgCtx, c.config.CleanupTimeout)
+		clean := c.driver.Recyclable(ctx, ic.conn)
+		cancel()
 
-	if !c.driver.Recyclable(ctx, ic.conn) {
-		return false
+		if !clean {
+			return false
+		}
 	}
 
 	// Idle expiry is deliberately not checked here: the connection was in use

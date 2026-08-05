@@ -56,6 +56,8 @@ func (d *fakeDriver) Dead(conn *fakeConn) bool {
 	return conn.dead.Load()
 }
 
+func (d *fakeDriver) NeedsCleanup(*fakeConn) bool { return true }
+
 func (d *fakeDriver) Recyclable(_ context.Context, conn *fakeConn) bool {
 	d.cleanups.Add(1)
 	return conn.recyclable.Load()
@@ -249,7 +251,7 @@ func TestCoreCloseIsIdempotentAndClosesIdle(t *testing.T) {
 
 	core, driver := newTestCore(t, Config{MaxConns: 4})
 
-	handles := make([]*Handle[*fakeConn], 0, 3)
+	handles := make([]Handle[*fakeConn], 0, 3)
 	for range 3 {
 		handle, err := core.Acquire(t.Context())
 		if err != nil {
@@ -257,8 +259,10 @@ func TestCoreCloseIsIdempotentAndClosesIdle(t *testing.T) {
 		}
 		handles = append(handles, handle)
 	}
-	for _, handle := range handles {
-		handle.Release()
+	// By index, not by value: ranging would copy each handle and release the copy,
+	// which is the very hazard Handle documents.
+	for i := range handles {
+		handles[i].Release()
 	}
 
 	core.Close()

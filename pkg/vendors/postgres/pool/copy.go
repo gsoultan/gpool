@@ -39,7 +39,7 @@ func (c *connWrapper) CopyFrom(ctx context.Context, request gpool.CopyRequest) (
 
 	// gpool.CopyRows and pgx.CopyFromSource have identical method sets, so the
 	// source passes straight through with no adapter and no per-row copying.
-	copied, err := c.conn.CopyFrom(ctx, pgx.Identifier(request.Table), request.Columns, request.Rows)
+	copied, err := c.pgx().CopyFrom(ctx, pgx.Identifier(request.Table), request.Columns, request.Rows)
 	if err != nil {
 		return copied, fmt.Errorf("gpool/postgres: copy into %v: %w", request.Table, err)
 	}

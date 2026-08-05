@@ -1,5 +1,31 @@
 # Pool internals
 
+The PostgreSQL vendor runs on `pkg/pooling` like every other vendor. What is left
+here is what is genuinely PostgreSQL-specific: dialling pgx, judging a connection
+without I/O, and cleaning one up. Everything below about capacity, sharding, the
+clock and the reaper now describes the *engine*, reached through `Core[*pgConn]`.
+
+`pgConn` is the vendor's connection type — `{conn *pgx.Conn; listening bool}`.
+Being a type parameter rather than an interface is what lets the vendor keep its
+own per-connection bookkeeping without a side table.
+
+## Two costs the retarget exposed
+
+Both were caught by benchmarking the retarget rather than assuming it was free.
+
+- **`Driver.NeedsCleanup` exists to keep release cheap.** The engine originally
+  built a `context.WithTimeout` on every release to bound `Recyclable`. That is
+  four allocations and a runtime timer — it took the acquire path from 198 to 889
+  ns/op. A connection returned with nothing on it now pays none of it.
+- **`Handle` is returned by value**, so a vendor stores it inline in its wrapper
+  and pays one allocation for the pair rather than two. That is why `released` is
+  a plain word with CAS rather than an `atomic.Bool`: `atomic.Bool` carries a
+  `noCopy` marker that makes returning a `Handle` a vet error. Range over handles
+  by index, never by value.
+
+After both, the retarget is performance-neutral: 200-217 ns/op against 198.3
+before, one allocation either way.
+
 `pkg/vendors/postgres/pool`.
 
 ## Capacity
