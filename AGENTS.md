@@ -68,6 +68,12 @@ dependency without justification (currently pgx/v5 and pglogrepl, nothing else).
 - Vendors self-register from `init()`, database/sql style. Importing the vendor
   package is what makes the vendor resolvable; that must stay true and documented.
 - Adding a vendor must require zero edits to `pkg/gpool`.
+- **A vendor is its own Go module** under `vendors/`, so its driver never reaches a
+  consumer who does not use it. Shared machinery that would otherwise be copied
+  per vendor belongs in the core module and must stay dependency-free:
+  `pkg/pooling` is the engine, `pkg/sqldriver` is stdlib-only and serves every
+  `database/sql` driver. A new `database/sql` vendor should be about a hundred
+  lines — if it is more, something belongs in `pkg/sqldriver` instead.
 - Several databases means several pools, registered by name on the `Engine`, sharing
   nothing. Never multiplex databases through one pool: separate capacity is what
   keeps one saturated backend from starving the rest.

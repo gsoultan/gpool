@@ -23,8 +23,30 @@ behaviour:
 | :--- | :--- |
 | `pkg/gpool` | `Pool`, `Conn`, `Tx`, `Rows`, `Row`, `Result`, `Stat`, `Engine`, vendor registry, and the optional capabilities `BulkCopier`, `Batcher`, `Notifier` |
 | `pkg/gpool/cdc` | `Subscriber` = `Stream` + `TableManager` + `ReplicationManager`, plus `EventStream` and `Event` |
+| `pkg/pooling` | The pooling engine: capacity, lock-striped idle buckets, reaper, lifecycle, statistics |
+| `pkg/sqldriver` | Shared pooling for any `database/sql` driver (standard library only) |
 | `pkg/vendors/postgres/pool` | PostgreSQL pool implementation (`pgx/v5`) |
 | `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation (`pglogrepl`) |
+
+### Supported databases
+
+| Database | Module | Driver | CDC |
+| :--- | :--- | :--- | :--- |
+| PostgreSQL | `github.com/gsoultan/gpool` | `pgx/v5` | ✅ logical replication |
+| MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | — |
+| MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | — |
+
+Each non-PostgreSQL vendor is **its own Go module**. That is deliberate: a consumer
+using only PostgreSQL never downloads the MySQL driver, and `govulncheck` never flags a
+CVE in a driver you do not import. The cost is a `go get` per vendor.
+
+```bash
+go get github.com/gsoultan/gpool                # PostgreSQL, and the interfaces
+go get github.com/gsoultan/gpool/vendors/mysql  # MySQL and MariaDB
+```
+
+`pkg/pooling` and `pkg/sqldriver` live in the core module and depend on nothing beyond
+the standard library, which is what keeps each vendor module thin.
 
 Vendors self-register through `init()`, in the style of `database/sql` drivers. Importing the
 vendor package is what makes `gpool.Postgres` resolvable:
@@ -337,6 +359,59 @@ defer engine.Close() // closes every subscriber and every pool, joining errors
 `Close` is idempotent and one component failing to close does not stop the others. `AddPool` and
 `AddSubscriber` replace an existing registration *without* closing the displaced one — the caller
 may still be holding it.
+
+## 🐬 MySQL and MariaDB
+
+MariaDB speaks the MySQL wire protocol, so one implementation serves both; the two
+vendor names exist so calling code says which database it actually targets.
+
+```go
+import (
+    "github.com/gsoultan/gpool/pkg/gpool"
+    "github.com/gsoultan/gpool/vendors/mysql"
+)
+
+pool, err := mysql.New(mysql.Config{
+    // parseTime=true is worth setting: without it DATE and DATETIME columns
+    // arrive as raw bytes rather than time.Time.
+    DSN:      "user:pass@tcp(localhost:3306)/app?parseTime=true",
+    MaxConns: 50,
+    MinConns: 5,
+})
+if err != nil {
+    return err
+}
+defer pool.Close()
+```
+
+Or through the registry, exactly as with PostgreSQL:
+
+```go
+pool, err := gpool.NewPool(mysql.MariaDB, mysql.Config{DSN: dsn, MaxConns: 50})
+```
+
+Everything else — `Query`, `QueryRow`, `Exec`, `Acquire`, transactions, `Stat`, the
+release gate, the `MaxConns` ceiling — behaves identically to PostgreSQL, because it
+is the same engine underneath. Two differences worth knowing:
+
+- **`Result` carries `LastInsertID`.** MySQL has one and PostgreSQL does not, so it is
+  reached by type assertion rather than sitting on `gpool.Result`:
+  ```go
+  if withID, ok := result.(interface{ LastInsertID() (int64, bool) }); ok {
+      id, present := withID.LastInsertID()
+  }
+  ```
+- **`Rows.FieldDescriptions` reports only column names.** A `database/sql` driver
+  exposes nothing else, so the type fields are left zero rather than invented.
+
+Connections are pooled at the `driver.Conn` level rather than by wrapping `*sql.DB`.
+Wrapping `*sql.DB` would mean `database/sql` does the pooling and none of gpool's
+guarantees would apply — no release gate, no acquisition metrics, no shared behaviour
+with the native vendors.
+
+> A transaction the caller abandons is rolled back on release. `go-sql-driver`'s own
+> `ResetSession` does **not** do this, so without the gate the next caller inherits the
+> uncommitted work — verified by removing the gate and watching the row survive.
 
 ## 🗄️ Multiple Databases
 
