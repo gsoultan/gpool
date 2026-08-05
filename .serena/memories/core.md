@@ -16,6 +16,8 @@ Role profiles and the full working contract live in `AGENTS.md` at the repo root
   coupling: `mem:pool`
 - Memory and CPU under heavy client concurrency, what the profiles actually showed,
   and benchmark hygiene: `mem:scale`
+- How vendors are packaged, the shared database/sql adapter, and what differs
+  between a native vendor and a database/sql one: `mem:vendors`
 - Logical replication internals — connection split, LSN confirmation, WAL retention:
   `mem:cdc`
 - Test layout, what unit tests structurally cannot catch, how to get a server:

@@ -20,6 +20,16 @@ the abstraction holds.
 
 ### Added
 
+- **MySQL and MariaDB**, as the separate module
+  `github.com/gsoultan/gpool/vendors/mysql`. MariaDB speaks the MySQL wire
+  protocol, so one implementation registers under both names. A consumer using
+  only PostgreSQL never downloads the driver.
+- **`pkg/sqldriver`, shared pooling for any `database/sql` driver.** Connections
+  are pooled at the `driver.Conn` level rather than by wrapping `*sql.DB`;
+  wrapping would mean `database/sql` does the pooling and none of gpool's
+  guarantees would apply. Depends only on the standard library, so a vendor module
+  adds its own driver and nothing else to a consumer's graph. This is what makes
+  each `database/sql` vendor about a hundred lines.
 - **`pkg/pooling`, the vendor-agnostic pooling engine.** Capacity, lock-striped
   idle buckets, the reaper, lifecycle, and statistics now live in one generic
   `Core[C]`, parameterised by a `Driver[C]` adapter. A vendor supplies only what is
