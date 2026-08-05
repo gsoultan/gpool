@@ -367,6 +367,51 @@ defer engine.Close() // closes every subscriber and every pool, joining errors
 `AddSubscriber` replace an existing registration *without* closing the displaced one — the caller
 may still be holding it.
 
+## 🔀 Running Behind PgBouncer
+
+gpool replaces PgBouncer, but plenty of deployments cannot remove it — a managed
+service that only exposes a pooled endpoint, or a database already fronted by one.
+Stacking them works; the one thing to get right is prepared statements.
+
+| PgBouncer | gpool default | `StatementCacheCapacity: DisableCache` |
+| :--- | :--- | :--- |
+| `session` mode | ✅ | ✅ |
+| `transaction` mode, `max_prepared_statements > 0` | ✅ | ✅ |
+| `transaction` mode, `max_prepared_statements = 0` | ❌ `42P05` / `26000` | ✅ |
+
+PgBouncer gained prepared-statement tracking in **1.21** and enables it by default
+from **1.24** (`max_prepared_statements = 200`), so a current PgBouncer works with
+gpool untouched. Against an older one, or one with the setting off, gpool's cached
+statement names collide as clients move between backends — measured as
+`SQLSTATE 42P05: prepared statement "stmtcache_…" already exists`.
+
+The configuration that works against every version and mode:
+
+```go
+pool, err := gpool.NewPool(gpool.Postgres, postgrespool.Config{
+    ConnString:             "postgres://user:pass@pgbouncer:6432/app",
+    MaxConns:               25,
+    StatementCacheCapacity: postgrespool.DisableCache, // safe behind any pooler
+})
+```
+
+Three further things to know:
+
+- **Leave `ResetQuery` empty.** PgBouncer already runs `server_reset_query` itself;
+  adding gpool's own is a second round trip that buys nothing.
+- **`Notifier` will not work** through transaction mode. A `LISTEN` needs a stable
+  session, which is precisely what transaction pooling refuses to give.
+- **CDC must bypass PgBouncer entirely.** It does not proxy replication
+  connections. Point `postgrescdc.Config.ConnString` at the database directly.
+
+`Stat()` still describes gpool's own connections — which, stacked this way, are
+connections to the *proxy*. PgBouncer's server-side pool is reported by its own
+`SHOW POOLS`, not here. Worth knowing before labelling a dashboard "database
+connections".
+
+`integration/pgbouncer_test.go` covers all of this and reports which regime it
+observed; run it with `PGBOUNCER_URL` set.
+
 ## 🐬 MySQL and MariaDB
 
 MariaDB speaks the MySQL wire protocol, so one implementation serves both; the two
