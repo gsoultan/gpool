@@ -19,3 +19,6 @@ graphify-out/*
 .idea/
 .vscode/
 .DS_Store
+
+# Build artifacts from `go build ./...` in a main package
+/examples/gpoolproxy/gpoolproxy

@@ -18,6 +18,10 @@ unimportable and is the reason the tree was restructured.
 - `pkg/vendors/postgres/pool` — pgx/v5.
 - `pkg/vendors/postgres/cdc` — pglogrepl.
 - `integration/` — real-server tests. `benchmarks/` — comparative benchmarks.
+- `examples/gpoolproxy` — own module, a PostgreSQL pooler on `pkg/pooling`. The
+  one thing a library cannot do is bound connections across applications; that
+  needs a process. Also the generality proof for the engine — it drives `Core`
+  with a socket rather than a database driver. See `mem:proxy`.
 
 ## Conventions
 

@@ -412,6 +412,39 @@ connections".
 `integration/pgbouncer_test.go` covers all of this and reports which regime it
 observed; run it with `PGBOUNCER_URL` set.
 
+## 🏛️ Cross-application pooling
+
+There is one thing gpool cannot do as a library. An in-process pool bounds *its
+own* connections; it cannot see the other applications. Forty services holding
+twenty-five connections each still open a thousand, and no amount of library
+design fixes that — bounding connections across processes needs a process.
+
+`examples/gpoolproxy` is that process, built on the same `pkg/pooling` engine
+every vendor runs on: a PostgreSQL wire-protocol pooler in about a thousand
+lines, of which the vendor half is five methods. It is an example rather than a
+product, and its tests prove the property:
+
+```
+60 client connections across 12 applications ran on at most 4 PostgreSQL backends
+```
+
+Measured against PgBouncer 1.25.2, both pooling 16 server connections in
+transaction mode against the same PostgreSQL, queries per second:
+
+| clients | direct | PgBouncer | gpoolproxy |
+| ---: | ---: | ---: | ---: |
+| 8 | 50,058 | 27,004 | 23,830 |
+| 32 | 120,247 | 35,390 | 43,385 |
+| 128 | 122,591 | 32,001 | **55,055** |
+| 512 | *exceeds max_connections* | 28,989 | **61,565** |
+
+PgBouncer is the faster of the two when there is little to do — C and a tight
+event loop cost about 12 µs of CPU per query against gpoolproxy's 20 µs. What it
+cannot do is use a second core: it runs one thread, measured, so its ceiling is
+one core on any hardware. Under identical 128-client load gpoolproxy was measured
+at 120% of a core, above that ceiling. See `examples/gpoolproxy/README.md` for
+the method and the caveats.
+
 ## 🐬 MySQL and MariaDB
 
 MariaDB speaks the MySQL wire protocol, so one implementation serves both; the two
