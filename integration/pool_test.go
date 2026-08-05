@@ -14,6 +14,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,6 +352,55 @@ func TestPoolReusesConnectionAfterUnwinding(t *testing.T) {
 	// One connection, established once and unwound five times.
 	if got := pool.Stat().TotalConnections(); got != 1 {
 		t.Fatalf("TotalConnections() = %d, want 1 - the connection was replaced rather than unwound", got)
+	}
+}
+
+// MaxConns must bound the connections that exist on the server, not merely the
+// callers holding one. Those are different guarantees: holding a permit before
+// dialling gives only the second, because a permit released by one caller orders
+// nothing with respect to another caller's freshly pooled connection. A caller
+// can hold a permit, fail to see an idle connection that already exists, and dial
+// a surplus one — which is how a pool with MaxConns 4 ends up with five open.
+//
+// This is an end-to-end guard, not the reproduction. A real dial is slow enough
+// that the losing interleaving is rare here; it passed both with and without the
+// fix. The reliable reproduction is TestCoreHoldsCapacityUnderContention in
+// pkg/pooling, where the fake driver returns instantly and widens the window.
+func TestPoolNeverExceedsMaxConnsUnderContention(t *testing.T) {
+	const capacity = 4
+	pool := newPool(t, postgrespool.Config{MaxConns: capacity})
+
+	var peak atomic.Int32
+	var wg sync.WaitGroup
+
+	for range 128 {
+		wg.Go(func() {
+			for range 40 {
+				conn, err := pool.Acquire(context.Background())
+				if err != nil {
+					return
+				}
+
+				// Sample while connections are actually checked out, so a transient
+				// overshoot is caught rather than only the settled state.
+				for {
+					current := pool.Stat().TotalConnections()
+					high := peak.Load()
+					if current <= high || peak.CompareAndSwap(high, current) {
+						break
+					}
+				}
+				conn.Release()
+			}
+		})
+	}
+	wg.Wait()
+
+	if got := peak.Load(); got > capacity {
+		t.Fatalf("peak TotalConnections() = %d, want at most MaxConns (%d)", got, capacity)
+	}
+	if got := pool.Stat().TotalConnections(); got > capacity {
+		t.Fatalf("TotalConnections() = %d, want at most MaxConns (%d)", got, capacity)
 	}
 }
 

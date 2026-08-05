@@ -18,7 +18,34 @@ the abstraction holds.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`pkg/pooling`, the vendor-agnostic pooling engine.** Capacity, lock-striped
+  idle buckets, the reaper, lifecycle, and statistics now live in one generic
+  `Core[C]`, parameterised by a `Driver[C]` adapter. A vendor supplies only what is
+  genuinely vendor-specific: how to dial, how to tell a connection is dead, and how
+  to return one to a clean state. Generic over the driver's own connection type
+  rather than an interface, so nothing on the acquire path pays for dynamic
+  dispatch.
+
+### Fixed
+
+- **`MaxConns` did not bound the number of connections, only concurrent
+  checkouts.** Holding a permit before dialling is not sufficient: a permit
+  released by one caller creates no ordering with respect to a *different*
+  caller's freshly pooled connection, so a caller could hold a permit, fail to see
+  an idle connection that already existed, and dial a surplus one. Observed as a
+  pool with `MaxConns: 4` holding five connections with one sitting idle, unseen.
+  Dialling now reserves a slot in the total count, making the ceiling exact.
+  Present in v0.1.0.
+
+### Changed
+
+- **Cut the acquire path by a third** — 293.9 to 198.3 ns/op — by caching the
+  clock. Three `time.Now()` calls per acquire/release cycle measured at roughly a
+  quarter of the whole path, for values only ever compared against multi-second
+  bounds. `MaxConnIdleTime` and `MaxConnLifetime` are now judged against a reading
+  at most 100ms stale, so sub-second bounds are imprecise.
 
 ## [0.1.0] - 2026-08-05
 
