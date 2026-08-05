@@ -57,6 +57,11 @@ type Config struct {
 
 	// MaxConnIdleTime is how long a connection may sit idle before it is closed.
 	// Defaults to DefaultMaxConnIdleTime; negative disables idle expiry.
+	//
+	// Both this and MaxConnLifetime are judged against a clock cached to
+	// clockResolution, so a bound shorter than that is imprecise. Neither is meant
+	// for sub-second use, and reading the system clock on every acquire cost more
+	// than a quarter of the acquisition path.
 	MaxConnIdleTime time.Duration
 
 	// MaxConnLifetime is the total lifetime of a connection, measured from when it

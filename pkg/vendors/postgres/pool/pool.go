@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,10 @@ type Postgres struct {
 	emptyAcquireCount    atomic.Int64
 	canceledAcquireCount atomic.Int64
 
+	// clock is read on every acquire and release, so it is cached rather than
+	// asked of the system each time.
+	clock *coarseClock
+
 	closed    atomic.Bool
 	closeOnce sync.Once
 	bgCtx     context.Context
@@ -79,6 +84,7 @@ func New(config Config) (*Postgres, error) {
 		config:     config,
 		connConfig: connConfig,
 		permits:    newPermits(config.MaxConns),
+		clock:      newCoarseClock(),
 		bgCtx:      ctx,
 		bgCancel:   cancel,
 		bgDone:     make(chan struct{}),
@@ -109,16 +115,65 @@ func (p *Postgres) acquire(ctx context.Context) (*connWrapper, error) {
 		return nil, ErrPoolClosed
 	}
 
-	if ic, idx, ok := p.popIdle(); ok {
-		return newConnWrapper(p, ic, idx), nil
-	}
-
-	ic, err := p.connect(ctx)
+	ic, idx, err := p.take(ctx)
 	if err != nil {
 		p.permits.release()
 		return nil, err
 	}
-	return newConnWrapper(p, ic, int(rand.UintN(shardCount))), nil
+	return newConnWrapper(p, ic, idx), nil
+}
+
+// take returns a connection for a caller that already holds a permit, either by
+// reusing an idle one or by establishing a new one.
+//
+// Holding a permit is not on its own enough to bound the total number of
+// connections. A permit released by one caller establishes no ordering with
+// respect to a *different* caller's freshly pooled connection, so a probe can
+// legitimately miss an idle connection that already exists and dial a surplus
+// one. Reserving a slot in the total count is what makes MaxConns an actual
+// ceiling on connections to the server rather than only on concurrent checkouts.
+func (p *Postgres) take(ctx context.Context) (*idleConn, int, error) {
+	for {
+		if ic, idx, ok := p.popIdle(); ok {
+			return ic, idx, nil
+		}
+
+		if p.reserveSlot() {
+			ic, err := p.connect(ctx)
+			if err != nil {
+				p.releaseSlot()
+				return nil, 0, err
+			}
+			return ic, int(rand.UintN(shardCount)), nil
+		}
+
+		// At the ceiling with nothing visible to probe. Because this caller holds
+		// a permit, fewer than MaxConns others can hold one, so at least one of
+		// the existing connections is idle or on its way there — it just has not
+		// become visible yet. Yield and look again rather than exceed the ceiling.
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		runtime.Gosched()
+	}
+}
+
+// reserveSlot claims room for one more connection, reporting false at the ceiling.
+func (p *Postgres) reserveSlot() bool {
+	for {
+		current := p.totalConns.Load()
+		if current >= p.config.MaxConns {
+			return false
+		}
+		if p.totalConns.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+// releaseSlot gives back a reservation that was not turned into a connection.
+func (p *Postgres) releaseSlot() {
+	p.totalConns.Add(-1)
 }
 
 // acquirePermit takes a permit and records what it cost.
@@ -150,7 +205,7 @@ func (p *Postgres) acquirePermit(ctx context.Context) error {
 // contention the striping exists to remove.
 func (p *Postgres) popIdle() (*idleConn, int, bool) {
 	start := rand.UintN(shardCount)
-	now := time.Now()
+	now := p.clock.now()
 
 	for i := range uint(shardCount) {
 		idx := int((start + i) % shardCount)
@@ -180,7 +235,7 @@ func (p *Postgres) release(ic *idleConn, shardIdx int) {
 		return
 	}
 
-	ic.idleSince = time.Now()
+	ic.idleSince = p.clock.now()
 	p.shards[shardIdx].push(ic)
 }
 
@@ -220,7 +275,7 @@ func (p *Postgres) recyclable(ic *idleConn) bool {
 
 	// Idle expiry is deliberately not checked here: the connection was in use until
 	// this instant, so only its total lifetime can have run out.
-	return !ic.expired(time.Now(), p.config.MaxConnLifetime, 0)
+	return !ic.expired(p.clock.now(), p.config.MaxConnLifetime, 0)
 }
 
 // rollback unwinds a transaction left open by the previous caller, reporting
@@ -286,7 +341,9 @@ func (p *Postgres) connect(ctx context.Context) (*idleConn, error) {
 		}
 	}
 
-	p.totalConns.Add(1)
+	// The slot was reserved by take before dialling, so the count is already
+	// correct. Establishing a connection is not a hot path, so this one reading
+	// of the clock is exact rather than cached.
 	now := time.Now()
 	return &idleConn{conn: conn, createdAt: now, idleSince: now}, nil
 }
@@ -294,7 +351,7 @@ func (p *Postgres) connect(ctx context.Context) (*idleConn, error) {
 // destroy closes a connection and drops it from the total count.
 func (p *Postgres) destroy(ic *idleConn) {
 	closeConn(ic.conn)
-	p.totalConns.Add(-1)
+	p.releaseSlot()
 }
 
 // closeConn closes a pgx connection with a bounded, cancellation-immune context so
@@ -316,19 +373,25 @@ func (p *Postgres) maintain() {
 
 	p.warmUp()
 
-	if p.config.HealthCheckPeriod <= 0 {
-		<-p.bgCtx.Done()
-		return
-	}
+	// The clock ticks regardless of whether health checking is enabled: the
+	// acquire path reads it, so it must stay fresh even when nothing is reaped.
+	clock := time.NewTicker(clockResolution)
+	defer clock.Stop()
 
-	ticker := time.NewTicker(p.config.HealthCheckPeriod)
-	defer ticker.Stop()
+	var health <-chan time.Time
+	if p.config.HealthCheckPeriod > 0 {
+		ticker := time.NewTicker(p.config.HealthCheckPeriod)
+		defer ticker.Stop()
+		health = ticker.C
+	}
 
 	for {
 		select {
 		case <-p.bgCtx.Done():
 			return
-		case <-ticker.C:
+		case <-clock.C:
+			p.clock.update()
+		case <-health:
 			p.reapExpired()
 			p.warmUp()
 		}
@@ -339,7 +402,7 @@ func (p *Postgres) maintain() {
 // a pool that goes quiet after a failover keeps handing out connections to a server
 // that no longer exists.
 func (p *Postgres) reapExpired() {
-	now := time.Now()
+	now := p.clock.now()
 	stale := func(ic *idleConn) bool {
 		return ic.dead() || ic.expired(now, p.config.MaxConnLifetime, p.config.MaxConnIdleTime)
 	}
@@ -362,9 +425,14 @@ func (p *Postgres) warmUp() {
 		if err := p.permits.acquire(p.bgCtx); err != nil {
 			return
 		}
+		if !p.reserveSlot() {
+			p.permits.release()
+			return
+		}
 
 		ic, err := p.connect(p.bgCtx)
 		if err != nil {
+			p.releaseSlot()
 			p.permits.release()
 			return
 		}
