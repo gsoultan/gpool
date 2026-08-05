@@ -239,8 +239,8 @@ func assertHeader(t *testing.T, event cdc.Event, op cdc.Op, lsn uint64) {
 	if event.Schema != "public" || event.Table != "users" {
 		t.Errorf("relation = %s.%s, want public.users", event.Schema, event.Table)
 	}
-	if event.LSN != lsn {
-		t.Errorf("LSN = %d, want %d", event.LSN, lsn)
+	if event.Position != position(lsn) {
+		t.Errorf("Position = %q, want %q", event.Position, position(lsn))
 	}
 }
 

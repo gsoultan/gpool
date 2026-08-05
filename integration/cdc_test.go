@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -165,8 +166,8 @@ func TestCDCStreamsChanges(t *testing.T) {
 			t.Errorf("event %d table = %q, want %q", i, event.Table, f.table)
 		}
 		// Every event carries the position needed to resume from it.
-		if event.LSN == 0 {
-			t.Errorf("event %d has no LSN", i)
+		if event.Position == cdc.NoPosition {
+			t.Errorf("event %d has no position", i)
 		}
 	}
 
@@ -241,6 +242,122 @@ func TestCDCResumesFromTheSlotAfterReconnect(t *testing.T) {
 
 // Table management runs on its own control connection, so it must work while a
 // stream is live. Sharing the walsender connection corrupted the protocol.
+// insertRows writes one row per statement, so each is its own transaction and a
+// position between them is a real boundary.
+func (f *cdcFixture) insertRows(t *testing.T, emails ...string) {
+	t.Helper()
+
+	for _, email := range emails {
+		if _, err := f.pool.Exec(t.Context(),
+			fmt.Sprintf("INSERT INTO %s (email) VALUES ($1)", f.table), email); err != nil {
+			t.Fatalf("INSERT %s = %v", email, err)
+		}
+	}
+}
+
+func emailsOf(events []cdc.Event) []string {
+	seen := make([]string, 0, len(events))
+	for _, event := range events {
+		seen = append(seen, fmt.Sprint(event.After["email"]))
+	}
+	return seen
+}
+
+// SubscribeFrom is what lets a consumer keep its own bookkeeping rather than
+// trusting the slot, and against a source with no server-side position it is the
+// only way to resume at all. Here it has to move the stream forward: everything
+// before the recorded position stays skipped.
+//
+// Delivery is at-least-once, and the recorded position sits at the end of a
+// row's record while its transaction commits slightly later, so the event the
+// position came from may arrive again. That is the guarantee working, not a
+// defect — which is why this asserts on what must not reappear rather than on an
+// exact list.
+func TestCDCResumesForwardFromARecordedPosition(t *testing.T) {
+	f := newCDCFixture(t)
+	subscriber := f.subscribe(t)
+
+	stream, err := subscriber.Subscribe(t.Context())
+	if err != nil {
+		t.Fatalf("Subscribe() = %v", err)
+	}
+	f.insertRows(t, "r1", "r2", "r3", "r4")
+
+	first := collect(t, stream, 4, 20*time.Second)
+	if len(first) != 4 {
+		t.Fatalf("collected %d events, want 4", len(first))
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+
+	checkpoint := first[3].Position
+	if checkpoint == cdc.NoPosition {
+		t.Fatal("event carries no position to resume from")
+	}
+	f.insertRows(t, "r5")
+
+	resumed, err := subscriber.SubscribeFrom(t.Context(), checkpoint)
+	if err != nil {
+		t.Fatalf("SubscribeFrom(%q) = %v", checkpoint, err)
+	}
+	defer resumed.Close()
+
+	got := emailsOf(collect(t, resumed, 2, 20*time.Second))
+	t.Logf("resuming after %q delivered %v", checkpoint, got)
+
+	if !slices.Contains(got, "r5") {
+		t.Errorf("resumed stream = %v, want it to reach r5", got)
+	}
+	for _, stale := range []string{"r1", "r2", "r3"} {
+		if slices.Contains(got, stale) {
+			t.Errorf("resumed stream replayed %s, so it did not resume forward: %v", stale, got)
+		}
+	}
+}
+
+// PostgreSQL clamps a start position up to the slot's confirmed_flush_lsn and
+// says nothing, so a consumer resuming from older bookkeeping would get a stream
+// with a hole in it that looks complete. Refusing is the only way the caller
+// finds out.
+func TestCDCRefusesToResumeBehindTheSlot(t *testing.T) {
+	f := newCDCFixture(t)
+	subscriber := f.subscribe(t)
+
+	stream, err := subscriber.Subscribe(t.Context())
+	if err != nil {
+		t.Fatalf("Subscribe() = %v", err)
+	}
+	f.insertRows(t, "r1", "r2", "r3", "r4")
+
+	first := collect(t, stream, 4, 20*time.Second)
+	if len(first) != 4 {
+		t.Fatalf("collected %d events, want 4", len(first))
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+
+	// The stream confirmed its way past the first event as the consumer drained
+	// it, so that position is now behind the slot.
+	_, err = subscriber.SubscribeFrom(t.Context(), first[0].Position)
+	if !errors.Is(err, postgrescdc.ErrPositionBehindSlot) {
+		t.Fatalf("SubscribeFrom(%q) = %v, want ErrPositionBehindSlot", first[0].Position, err)
+	}
+}
+
+// A position from another vendor must not start a stream. Coercing it would
+// resume from an arbitrary point in the WAL without saying so.
+func TestCDCRejectsAForeignPosition(t *testing.T) {
+	f := newCDCFixture(t)
+	subscriber := f.subscribe(t)
+
+	_, err := subscriber.SubscribeFrom(t.Context(), "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5")
+	if err == nil {
+		t.Fatal("SubscribeFrom() accepted a MySQL GTID set as a PostgreSQL position")
+	}
+}
+
 func TestCDCTableManagementDuringStreaming(t *testing.T) {
 	f := newCDCFixture(t)
 	subscriber := f.subscribe(t)

@@ -101,3 +101,10 @@ Analytical column store, so it does not behave like the transactional vendors:
   ClickHouse spends real memory per concurrent query.
 - `Config.Options` exists for what a DSN cannot express — compression, TLS,
   multiple hosts for failover.
+
+## CDC vendors
+
+PostgreSQL (`pkg/vendors/postgres/cdc`) and MySQL/MariaDB (`vendors/mysql/cdc`).
+A vendor registers CDC with `gpool.RegisterSubscriber`; having a pool does not
+imply having CDC, and `NewSubscriber` says so with `ErrNoCDCSupport` rather than
+suggesting an import that cannot help. See `mem:cdc` and `mem:cdc_mysql`.

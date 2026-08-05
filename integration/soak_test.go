@@ -368,7 +368,7 @@ func TestSoakCDCStreamAdvancesTheSlot(t *testing.T) {
 	go func() {
 		defer close(consumed)
 		for event := range stream.All() {
-			if event.LSN != 0 {
+			if event.Position != cdc.NoPosition {
 				received.Add(1)
 			}
 			if ctx.Err() != nil {

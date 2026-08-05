@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -80,6 +81,29 @@ func TestUnregisteredVendorIsReported(t *testing.T) {
 	_, err = gpool.NewSubscriber("never-registered", nil)
 	if !errors.Is(err, gpool.ErrVendorNotRegistered) {
 		t.Fatalf("NewSubscriber() = %v, want ErrVendorNotRegistered", err)
+	}
+}
+
+// A vendor with a pool but no CDC gets a different answer from one that was
+// never imported. Telling someone to import a package they already imported —
+// because the CDC implementation does not exist — sends them after a bug that
+// is not there.
+func TestVendorWithoutCDCIsDistinguishedFromAnUnimportedOne(t *testing.T) {
+	const vendor = gpool.Vendor("test-pool-only")
+
+	if err := gpool.RegisterPool(vendor, func(any) (gpool.Pool, error) { return nil, nil }); err != nil {
+		t.Fatalf("RegisterPool() = %v", err)
+	}
+
+	_, err := gpool.NewSubscriber(vendor, nil)
+	if !errors.Is(err, gpool.ErrNoCDCSupport) {
+		t.Fatalf("NewSubscriber() = %v, want ErrNoCDCSupport", err)
+	}
+	if errors.Is(err, gpool.ErrVendorNotRegistered) {
+		t.Error("a pool-only vendor must not be reported as unregistered")
+	}
+	if strings.Contains(err.Error(), "did you import") {
+		t.Errorf("error advises an import that cannot help: %v", err)
 	}
 }
 

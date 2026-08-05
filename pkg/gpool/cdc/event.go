@@ -42,9 +42,17 @@ type Event struct {
 	Schema string
 	// Table is the name of the database table.
 	Table string
-	// LSN is the WAL position immediately after the record that produced this event.
-	// Persist it if you need to resume from a known position.
-	LSN uint64
+	// Position marks this change's place in the source's change log. Record it
+	// and hand it to Stream.SubscribeFrom to resume from here.
+	//
+	// Resuming starts at or before the change the position came from, never after
+	// it: a resumed stream may repeat changes it already delivered, but does not
+	// skip any. That is what carries at-least-once delivery across a restart.
+	// Exactly where the boundary falls is the vendor's business — PostgreSQL
+	// replays from the transaction containing the change, MySQL from the start of
+	// it — so a consumer that must not process a change twice needs its own
+	// idempotency, not a tighter position.
+	Position Position
 	// Before contains the row data before the change (Update and Delete only, and
 	// only for columns covered by the table's REPLICA IDENTITY).
 	Before map[string]any

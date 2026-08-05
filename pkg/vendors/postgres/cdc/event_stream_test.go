@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
 )
 
 func TestAdvanceIsMonotonic(t *testing.T) {
@@ -108,9 +106,9 @@ func TestCatchUpAdvancesOnlyWhenDrained(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			s := &pgEventStream{events: make(chan cdc.Event, 4)}
+			s := &pgEventStream{events: make(chan pendingEvent, 4)}
 			for range tt.buffered {
-				s.events <- cdc.Event{}
+				s.events <- pendingEvent{}
 			}
 			s.lastPushed.Store(tt.lastPushed)
 			s.flushed.Store(tt.flushed)
@@ -129,7 +127,7 @@ func TestCatchUpAdvancesOnlyWhenDrained(t *testing.T) {
 func TestCatchUpKeepsPositionsAligned(t *testing.T) {
 	t.Parallel()
 
-	s := &pgEventStream{events: make(chan cdc.Event, 4)}
+	s := &pgEventStream{events: make(chan pendingEvent, 4)}
 	s.lastPushed.Store(100)
 	s.flushed.Store(100)
 
@@ -164,7 +162,7 @@ func TestAllRefusesConcurrentIteration(t *testing.T) {
 	t.Parallel()
 
 	s := &pgEventStream{
-		events: make(chan cdc.Event, 1),
+		events: make(chan pendingEvent, 1),
 		done:   make(chan struct{}),
 	}
 	close(s.done)

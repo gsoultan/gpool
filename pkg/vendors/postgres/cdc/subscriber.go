@@ -47,7 +47,14 @@ type Postgres struct {
 	streaming bool
 }
 
-var _ cdc.Subscriber = (*Postgres)(nil)
+var (
+	_ cdc.Subscriber = (*Postgres)(nil)
+	// Slot and publication administration is optional on Subscriber now, so the
+	// proof that PostgreSQL still offers it has to be explicit — otherwise
+	// dropping a method here would compile and only fail at the caller's type
+	// assertion, at runtime.
+	_ cdc.ReplicationManager = (*Postgres)(nil)
+)
 
 // New creates a PostgreSQL CDC subscriber. It validates the configuration but does
 // not dial the database; connections are established on first use.
@@ -61,9 +68,29 @@ func New(config Config) (*Postgres, error) {
 	return &Postgres{config: config}, nil
 }
 
-// Subscribe starts change data capture and returns a stream of events.
-// Only one stream may be open at a time.
+// Subscribe starts change data capture from the slot's confirmed position, which
+// replays everything the slot retained while this consumer was away.
 func (p *Postgres) Subscribe(ctx context.Context) (cdc.EventStream, error) {
+	return p.SubscribeFrom(ctx, cdc.NoPosition)
+}
+
+// SubscribeFrom starts change data capture after a recorded position.
+// Only one stream may be open at a time.
+//
+// Passing NoPosition defers to the slot, which is what a PostgreSQL consumer
+// normally wants: the server has been holding WAL for exactly this purpose. An
+// explicit position is for a consumer keeping its own bookkeeping, and it is
+// honoured over Config.StartLSN.
+func (p *Postgres) SubscribeFrom(ctx context.Context, after cdc.Position) (cdc.EventStream, error) {
+	start := p.config.StartLSN
+	if after != cdc.NoPosition {
+		parsed, err := parsePosition(after)
+		if err != nil {
+			return nil, err
+		}
+		start = parsed
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -85,11 +112,17 @@ func (p *Postgres) Subscribe(ctx context.Context) (cdc.EventStream, error) {
 		}
 	}
 
+	if after != cdc.NoPosition {
+		if err := p.checkResumable(ctx, start, after); err != nil {
+			return nil, err
+		}
+	}
+
 	conn, err := p.dialReplication(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := p.startReplication(ctx, conn); err != nil {
+	if err := p.startReplication(ctx, conn, start); err != nil {
 		closeConn(conn)
 		return nil, err
 	}
@@ -98,6 +131,53 @@ func (p *Postgres) Subscribe(ctx context.Context) (cdc.EventStream, error) {
 	p.stream = stream
 	p.streaming = true
 	return stream, nil
+}
+
+// checkResumable refuses a start position the slot has already moved past.
+//
+// The server would accept it and silently begin at confirmed_flush_lsn instead,
+// so a consumer resuming from its own older bookkeeping would receive a stream
+// missing everything between the two positions, with nothing to distinguish it
+// from a complete one. The caller is told the two positions so it can decide:
+// accept the gap by calling Subscribe, or treat it as the data loss it is.
+func (p *Postgres) checkResumable(ctx context.Context, start uint64, after cdc.Position) error {
+	confirmed, ok, err := p.slotConfirmed(ctx)
+	if err != nil || !ok || start >= confirmed {
+		return err
+	}
+	return fmt.Errorf("%w: asked to resume after %s, but slot %q has confirmed %s",
+		ErrPositionBehindSlot, after, p.config.SlotName, position(confirmed))
+}
+
+// slotConfirmed reports the slot's confirmed position, and whether it has one.
+func (p *Postgres) slotConfirmed(ctx context.Context) (uint64, bool, error) {
+	conn, err := p.controlConn(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+
+	result := conn.ExecParams(ctx, slotConfirmedSQL, [][]byte{[]byte(p.config.SlotName)}, nil, nil, nil)
+
+	var text string
+	if result.NextRow() {
+		// Values are only valid until the next NextRow, so this copies rather
+		// than aliasing the reader's buffer.
+		if values := result.Values(); len(values) > 0 && values[0] != nil {
+			text = string(values[0])
+		}
+	}
+	if _, err := result.Close(); err != nil {
+		return 0, false, fmt.Errorf("gpool/postgres/cdc: reading slot %q: %w", p.config.SlotName, err)
+	}
+	if text == "" {
+		return 0, false, nil
+	}
+
+	lsn, err := parsePosition(cdc.Position(text))
+	if err != nil {
+		return 0, false, err
+	}
+	return lsn, true, nil
 }
 
 // releaseStream is called by the stream once it has closed itself. It must run
@@ -110,12 +190,12 @@ func (p *Postgres) releaseStream() {
 }
 
 // startReplication issues START_REPLICATION for the configured slot.
-func (p *Postgres) startReplication(ctx context.Context, conn *pgconn.PgConn) error {
+func (p *Postgres) startReplication(ctx context.Context, conn *pgconn.PgConn, start uint64) error {
 	// A zero start position tells the server to resume from the slot's
 	// confirmed_flush_lsn. Starting from the server's current WAL head instead
 	// would discard everything the slot retained while this consumer was away,
 	// which is the whole point of holding a slot.
-	startLSN := pglogrepl.LSN(p.config.StartLSN)
+	startLSN := pglogrepl.LSN(start)
 
 	options := pglogrepl.StartReplicationOptions{
 		PluginArgs: []string{

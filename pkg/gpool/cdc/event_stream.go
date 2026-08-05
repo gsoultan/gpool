@@ -8,15 +8,20 @@ import (
 
 // EventStream is a live stream of CDC events.
 //
-// Delivery is at-least-once. The stream confirms a WAL position to the server only
-// after the iterator body for that event has returned, so a crash mid-processing
-// replays the event rather than losing it. The corollary is that a consumer which
-// hands work to another goroutine and returns immediately has confirmed work it has
-// not done: either finish processing before returning from the loop body, or persist
-// Event.LSN yourself and resume from it.
+// Delivery is at-least-once. A position is treated as processed only after the
+// iterator body for that event has returned, so a crash mid-processing replays
+// the event rather than losing it. The corollary is that a consumer which hands
+// work to another goroutine and returns immediately has confirmed work it has not
+// done: either finish processing before returning from the loop body, or record
+// Event.Position yourself and resume from it with Stream.SubscribeFrom.
 //
-// Until a position is confirmed the server retains the WAL behind it, so a consumer
-// that stops draining will grow the primary's disk usage.
+// What falling behind costs depends on the source, and the two failure modes are
+// opposites. Where the server tracks each consumer's position — a PostgreSQL
+// replication slot — the log is retained until the position advances, so a
+// consumer that stops draining grows the primary's disk. Where it does not — a
+// MySQL binlog expires on age and size regardless of who is reading — falling far
+// enough behind means the changes are gone. Each vendor's package documents which
+// of the two it is.
 type EventStream interface {
 	// All returns an iterator over the stream's events. It blocks waiting for
 	// changes and ends when the stream is closed or fails. Only one call to All

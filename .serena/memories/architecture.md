@@ -17,6 +17,9 @@ unimportable and is the reason the tree was restructured.
   `ReplicationManager` + `Close`. Also `EventStream`, `Event`, `Op`.
 - `pkg/vendors/postgres/pool` — pgx/v5.
 - `pkg/vendors/postgres/cdc` — pglogrepl.
+- `vendors/mysql/cdc` — binary log, its own module nested in the pool vendor
+  (11 modules against 47). The second CDC vendor, and therefore the thing that
+  proved `pkg/gpool/cdc` was not PostgreSQL-shaped. See `mem:cdc_mysql`.
 - `integration/` — real-server tests. `benchmarks/` — comparative benchmarks.
 - `examples/gpoolproxy` — own module, a PostgreSQL pooler on `pkg/pooling`. The
   one thing a library cannot do is bound connections across applications; that

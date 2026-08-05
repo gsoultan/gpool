@@ -33,7 +33,7 @@ type pgEventStream struct {
 	conn     *pgconn.PgConn
 	ctx      context.Context
 	cancel   context.CancelFunc
-	events   chan cdc.Event
+	events   chan pendingEvent
 	interval time.Duration
 
 	// received is the highest WAL position read off the wire.
@@ -58,6 +58,10 @@ var _ cdc.EventStream = (*pgEventStream)(nil)
 
 // newEventStream starts the reader goroutine for an already-started replication
 // connection. The stream takes ownership of conn.
+//
+// PostgreSQL retains WAL behind an unconfirmed position, so a consumer that
+// stops draining this stream grows the primary's disk rather than losing data —
+// the opposite of the failure mode on a source with an expiring log.
 func newEventStream(parent context.Context, conn *pgconn.PgConn, config Config, onClose func()) *pgEventStream {
 	// The stream outlives the call that created it, so it is detached from the
 	// caller's context: cancelling Subscribe's context must not tear down a stream
@@ -68,7 +72,7 @@ func newEventStream(parent context.Context, conn *pgconn.PgConn, config Config, 
 		conn:     conn,
 		ctx:      ctx,
 		cancel:   cancel,
-		events:   make(chan cdc.Event, config.Buffer),
+		events:   make(chan pendingEvent, config.Buffer),
 		interval: config.StandbyInterval,
 		onClose:  onClose,
 		done:     make(chan struct{}),
@@ -90,11 +94,11 @@ func (s *pgEventStream) All() iter.Seq[cdc.Event] {
 		defer s.iterating.Store(false)
 		defer func() { _ = s.Close() }()
 
-		for event := range s.events {
-			if !yield(event) {
+		for pending := range s.events {
+			if !yield(pending.event) {
 				return
 			}
-			advance(&s.flushed, event.LSN)
+			advance(&s.flushed, pending.lsn)
 		}
 	}
 }
@@ -237,21 +241,21 @@ func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*pglogr
 		if !ok {
 			return true
 		}
-		return s.emit(decodeInsert(rel, m, end), ticker)
+		return s.emit(pendingEvent{event: decodeInsert(rel, m, end), lsn: end}, ticker)
 
 	case *pglogrepl.UpdateMessage:
 		rel, ok := relations[m.RelationID]
 		if !ok {
 			return true
 		}
-		return s.emit(decodeUpdate(rel, m, end), ticker)
+		return s.emit(pendingEvent{event: decodeUpdate(rel, m, end), lsn: end}, ticker)
 
 	case *pglogrepl.DeleteMessage:
 		rel, ok := relations[m.RelationID]
 		if !ok {
 			return true
 		}
-		return s.emit(decodeDelete(rel, m, end), ticker)
+		return s.emit(pendingEvent{event: decodeDelete(rel, m, end), lsn: end}, ticker)
 
 	default:
 		// BEGIN, COMMIT, ORIGIN, TYPE, TRUNCATE and friends carry no row change.
@@ -262,15 +266,15 @@ func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*pglogr
 
 // emit hands an event to the consumer, continuing to confirm the stream's position
 // while it waits. It reports whether to keep running.
-func (s *pgEventStream) emit(event cdc.Event, ticker *time.Ticker) bool {
+func (s *pgEventStream) emit(pending pendingEvent, ticker *time.Ticker) bool {
 	// Published before the send so catchUp, which runs in this same goroutine
 	// between sends, can never see an empty channel and conclude the pipeline is
 	// drained while an event is in flight.
-	s.lastPushed.Store(event.LSN)
+	s.lastPushed.Store(pending.lsn)
 
 	for {
 		select {
-		case s.events <- event:
+		case s.events <- pending:
 			return true
 		case <-ticker.C:
 			if !s.sendStatus() {
