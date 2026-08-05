@@ -1,8 +1,14 @@
 # Gpool Core
 
-Graph root. Library-only Go module for PostgreSQL pooling + CDC. Module path
-`github.com/gsoultan/gpool`. No binary, no config file, no logger, no metrics server,
-no process-global mutable state beyond the vendor registry.
+Graph root. Library-only Go module for database connection pooling, with CDC for
+PostgreSQL. Module path `github.com/gsoultan/gpool`. No binary, no config file, no
+logger, no metrics server, no process-global mutable state beyond the vendor
+registry.
+
+Five databases across four Go modules: PostgreSQL (core, native pgx), and MySQL,
+MariaDB, SQL Server and ClickHouse in separate `vendors/*` modules over the shared
+`pkg/sqldriver`. CDC is PostgreSQL-only — logical replication has no equivalent in
+the others.
 
 Role profiles and the full working contract live in `AGENTS.md` at the repo root;
 `CLAUDE.md` imports it. Read those before non-trivial changes.

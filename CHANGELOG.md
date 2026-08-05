@@ -62,6 +62,10 @@ the abstraction holds.
 
 ### Changed
 
+- **PostgreSQL is no longer the only vendor**, which resolves the corresponding
+  entry under v0.1.0's known limitations. The abstraction has now been proven
+  against three further engines, including one — ClickHouse — that is not
+  transactional.
 - **Cut the acquire path by a third** — 293.9 to 198.3 ns/op — by caching the
   clock. Three `time.Now()` calls per acquire/release cycle measured at roughly a
   quarter of the whole path, for values only ever compared against multi-second
