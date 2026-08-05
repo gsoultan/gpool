@@ -14,11 +14,26 @@ import (
 const (
 	headerSize = 5
 
-	// relayBufSize is how large a message body may be and still pass through the
-	// reusable buffer rather than being streamed. Anything larger is copied
-	// straight from one socket to the other, so a big result set costs no
-	// per-message allocation either way.
-	relayBufSize = 64 << 10
+	// relayChunk is the unit a message body moves in. A body larger than this is
+	// copied through in several passes rather than buffered whole, so a large
+	// result set costs no more memory than a small one.
+	//
+	// Everything here is multiplied by the client count, which is the number a
+	// pooler exists to make large. Two of these plus the two socket buffers is
+	// 24 KiB per client — 72 MiB at three thousand — where 64 KiB apiece would
+	// have been 750 MiB of buffer to move the same bytes. PgBouncer's equivalent
+	// (pkt_buf) defaults to 4 KiB, which is the evidence that this is enough.
+	relayChunk = 4 << 10
+
+	// clientBufSize is the socket buffer for one client, and is therefore also
+	// multiplied by the client count. It only needs to hold a pipelined batch of
+	// small messages; bulk payloads stream through relayChunk regardless.
+	clientBufSize = 8 << 10
+
+	// backendBufSize is the socket buffer for one pooled server connection.
+	// There are MaxConns of these rather than one per client, so it is sized for
+	// throughput instead.
+	backendBufSize = 64 << 10
 
 	// maxMessageLen rejects a length field that would have us allocate or wait on
 	// an absurd amount of data. An adversarial peer can otherwise announce 4 GiB
@@ -71,7 +86,7 @@ type relay struct {
 }
 
 func newRelay() *relay {
-	return &relay{buf: make([]byte, relayBufSize)}
+	return &relay{buf: make([]byte, relayChunk)}
 }
 
 // readHeader reads a message header and reports its type and body length. The
@@ -113,8 +128,17 @@ func (r *relay) forwardBody(dst *bufio.Writer, src *bufio.Reader, bodyLen int) (
 		return body, nil
 	}
 
-	if _, err := io.CopyN(dst, src, int64(bodyLen)); err != nil {
-		return nil, err
+	// Larger than one chunk, so it moves in passes. io.CopyN would do this too,
+	// but it allocates a LimitedReader per message, and per message is per query.
+	for remaining := bodyLen; remaining > 0; {
+		chunk := min(remaining, len(r.buf))
+		if _, err := io.ReadFull(src, r.buf[:chunk]); err != nil {
+			return nil, err
+		}
+		if _, err := dst.Write(r.buf[:chunk]); err != nil {
+			return nil, err
+		}
+		remaining -= chunk
 	}
 	return nil, nil
 }

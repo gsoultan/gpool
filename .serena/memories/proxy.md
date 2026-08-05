@@ -59,9 +59,10 @@ first connect. Inventing them is a lie the proxy cannot keep consistent.
 ## Messages are relayed, not decoded
 
 Read the 5-byte header, forward the body. ReadyForQuery is the only backend
-message inspected, and its body is one byte. Bodies over 64 KiB stream with
-`io.CopyN` rather than buffering. Flush only once the source has drained, so a
-pipelined batch costs one syscall rather than one per message.
+message inspected, and its body is one byte. Bodies larger than one chunk move in
+passes through the same buffer — not `io.CopyN`, which allocates a LimitedReader
+per message, and per message is per query. Flush only once the source has
+drained, so a pipelined batch costs one syscall rather than one per message.
 
 ## Security decisions worth keeping
 
@@ -80,20 +81,43 @@ pipelined batch costs one syscall rather than one per message.
   key to the backend's, under the session lock so the backend cannot be released
   and reused mid-cancel.
 
+## Buffers are per client, so they are what multiplies
+
+`relayChunk` 4 KiB, `clientBufSize` 8 KiB, `backendBufSize` 64 KiB. A session is
+two socket buffers plus two relay chunks = 24 KiB. All four were 64 KiB once,
+which is 256 KiB per client and 750 MiB at three thousand — right for a handful
+of connections, wrong for the number a pooler exists to make large. Bodies over
+one chunk move in passes rather than being buffered whole. PgBouncer's `pkt_buf`
+defaults to 4 KiB, which is the evidence 4 KiB suffices.
+
+Measured cost at 3,000 clients: 107 MiB RSS, 37 KiB per client — the excess over
+24 KiB is goroutine stacks and the session struct.
+
 ## Measured against PgBouncer 1.25.2
 
-Matched pool size (16), transaction mode, same PostgreSQL, load generator in the
-same container network. Queries per second: 27,004 → 23,830 at 8 clients,
-35,390 → 43,385 at 32, 32,001 → 55,055 at 128, 28,989 → 61,565 at 512.
+Transaction mode, pool size 16 both sides, `max_client_conn` 3000 both sides,
+same PostgreSQL, load generator in the same container network, median of three
+interleaved runs. Queries per second, PgBouncer → gpoolproxy: 26,854 → 23,239 at
+8 clients, 34,698 → 51,792 at 32, 31,046 → 58,532 at 128, 26,973 → 50,742 at
+3,000. PgBouncer peaks at 32 clients and falls 22% by 3,000; the proxy peaks at
+128 and falls 13%.
 
-**PgBouncer is the cheaper of the two per query** — about 12 µs of CPU against
-20 µs. The crossover is not efficiency, it is that PgBouncer is one thread
-(measured: `Threads: 1`) and therefore capped at one core on any hardware, while
-the proxy was measured at 120% of a core under the same load. Its own answer is
-`so_reuseport`, which is several processes with separate pools that no longer add
-up to the configured size.
+**PgBouncer is the more efficient of the two and it is not close** — 14.8 µs of
+CPU per query against 27.6 µs, 6 KiB per client against 37 KiB. The crossover is
+not efficiency: PgBouncer is one thread (measured, `Threads: 1`) and therefore
+capped at one core on any hardware, while the proxy was measured at 140% of a
+core under the same load. PgBouncer was *not* saturated at 40% of its core, so
+its decline is event-loop serialisation rather than CPU exhaustion — the one-core
+ceiling is the durable claim, not that particular number. Its own answer is
+`so_reuseport`: several processes with separate pools that no longer add up to
+the configured size.
 
-Do not repeat the mistake of comparing at unmatched pool size; see `mem:testing`.
+**Interleave the targets at each concurrency; do not sweep one to completion.**
+Sweeping lets machine drift land on whichever target held the slot and be read as
+a difference between them — an early run reported PgBouncer at both 4,798 and
+2,705 q/s for the same case that way. Report medians of at least three runs.
+And do not repeat the mistake of comparing at unmatched pool size; see
+`mem:testing`.
 
 ## Known gaps, deliberate
 

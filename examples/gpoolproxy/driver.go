@@ -68,8 +68,8 @@ func (d *backendDriver) Connect(ctx context.Context) (*backend, error) {
 
 	return &backend{
 		conn:     hijacked.Conn,
-		reader:   bufio.NewReaderSize(hijacked.Conn, relayBufSize),
-		writer:   bufio.NewWriterSize(hijacked.Conn, relayBufSize),
+		reader:   bufio.NewReaderSize(hijacked.Conn, backendBufSize),
+		writer:   bufio.NewWriterSize(hijacked.Conn, backendBufSize),
 		pid:      hijacked.PID,
 		secret:   hijacked.SecretKey,
 		txStatus: txIdle,
