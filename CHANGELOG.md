@@ -20,10 +20,14 @@ the abstraction holds.
 
 ### Added
 
-- **MySQL and MariaDB**, as the separate module
-  `github.com/gsoultan/gpool/vendors/mysql`. MariaDB speaks the MySQL wire
-  protocol, so one implementation registers under both names. A consumer using
-  only PostgreSQL never downloads the driver.
+- **Four new databases**, each as its own Go module so a consumer downloads only
+  the drivers it uses. The core resolves 20 modules; ClickHouse alone brings 89.
+  - `vendors/mysql` — MySQL and MariaDB. MariaDB speaks the MySQL wire protocol,
+    so one implementation registers under both names.
+  - `vendors/mssql` — SQL Server.
+  - `vendors/clickhouse` — ClickHouse. Transactions are not generally available
+    there; the server's refusal is reported rather than hidden, and the connection
+    stays usable afterwards.
 - **`pkg/sqldriver`, shared pooling for any `database/sql` driver.** Connections
   are pooled at the `driver.Conn` level rather than by wrapping `*sql.DB`;
   wrapping would mean `database/sql` does the pooling and none of gpool's
@@ -40,6 +44,13 @@ the abstraction holds.
 
 ### Fixed
 
+- **Values from drivers outside `database/sql`'s documented type set were
+  rejected.** `driver.Value` is an `any`, and a driver with a richer type system
+  returns its own native types: ClickHouse hands back `uint8` for a boolean-ish
+  column and `uint64` for an unsigned integer, so even `SELECT 1` failed to scan.
+  Numeric conversion now falls back to reflection over the kind, as
+  `database/sql` does, and unsigned destinations keep the full range rather than
+  being truncated through `int64`.
 - **`MaxConns` did not bound the number of connections, only concurrent
   checkouts.** Holding a permit before dialling is not sufficient: a permit
   released by one caller creates no ordering with respect to a *different*

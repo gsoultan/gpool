@@ -6,17 +6,20 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"reflect"
 	"strconv"
 	"time"
 )
 
 // assign copies one driver value into a caller's destination.
 //
-// A driver.Value is drawn from a deliberately narrow set — nil, int64, float64,
-// bool, []byte, string, time.Time — which is what makes this tractable to write
-// out rather than reach for reflection. database/sql's own converter is long
-// because it also handles the outbound direction and arbitrary reflected kinds;
-// inbound from that fixed set is a closed problem.
+// database/sql documents driver.Value as a narrow set — nil, int64, float64,
+// bool, []byte, string, time.Time — and the type switches below cover it
+// directly, which is the common and fast path. But driver.Value is an `any`, and
+// a driver with a richer type system than that set will hand back its own native
+// types: ClickHouse returns uint8 for a boolean-ish column and uint64 for an
+// unsigned integer, so even `SELECT 1` arrives as a uint8. Numeric conversion
+// therefore falls back to reflection over the kind, exactly as database/sql does.
 //
 // Anything implementing sql.Scanner is handed the raw value, so user-defined types
 // keep working. A destination this does not cover is reported rather than silently
@@ -94,7 +97,13 @@ func assignBool(dest *bool, src driver.Value) error {
 		}
 		*dest = parsed
 	default:
-		return fmt.Errorf("%w: cannot scan %T into *bool", ErrScan, src)
+		// A driver outside the documented set: ClickHouse reports a boolean
+		// column as UInt8, so read it numerically rather than refuse it.
+		number, err := toInt64(src)
+		if err != nil {
+			return fmt.Errorf("%w: cannot scan %T into *bool", ErrScan, src)
+		}
+		*dest = number != 0
 	}
 	return nil
 }
@@ -135,7 +144,32 @@ func parseTime(dest *time.Time, value string) error {
 }
 
 // assignInteger handles every signed and unsigned integer width.
+//
+// Unsigned destinations are read through toUint64 rather than routed via int64,
+// which would lose anything above math.MaxInt64 — a real range for a UInt64
+// column in ClickHouse or a BIGINT UNSIGNED in MySQL.
 func assignInteger(dest any, src driver.Value) error {
+	switch d := dest.(type) {
+	case *uint, *uint8, *uint16, *uint32, *uint64:
+		value, err := toUint64(src)
+		if err != nil {
+			return err
+		}
+		switch u := d.(type) {
+		case *uint:
+			*u = uint(value)
+		case *uint8:
+			*u = uint8(value)
+		case *uint16:
+			*u = uint16(value)
+		case *uint32:
+			*u = uint32(value)
+		case *uint64:
+			*u = value
+		}
+		return nil
+	}
+
 	value, err := toInt64(src)
 	if err != nil {
 		return err
@@ -152,16 +186,6 @@ func assignInteger(dest any, src driver.Value) error {
 		*d = int32(value)
 	case *int64:
 		*d = value
-	case *uint:
-		*d = uint(value)
-	case *uint8:
-		*d = uint8(value)
-	case *uint16:
-		*d = uint16(value)
-	case *uint32:
-		*d = uint32(value)
-	case *uint64:
-		*d = uint64(value)
 	default:
 		return fmt.Errorf("%w: %T is not an integer destination", ErrScan, dest)
 	}
@@ -200,6 +224,24 @@ func toInt64(src driver.Value) (int64, error) {
 		return strconv.ParseInt(string(s), 10, 64)
 	case string:
 		return strconv.ParseInt(s, 10, 64)
+	}
+
+	// A driver outside the documented set: read it by kind rather than by type.
+	value := reflect.ValueOf(src)
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return value.Int(), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return int64(value.Uint()), nil
+	case reflect.Float32, reflect.Float64:
+		return int64(value.Float()), nil
+	case reflect.Bool:
+		if value.Bool() {
+			return 1, nil
+		}
+		return 0, nil
+	case reflect.String:
+		return strconv.ParseInt(value.String(), 10, 64)
 	default:
 		return 0, fmt.Errorf("%w: cannot read %T as an integer", ErrScan, src)
 	}
@@ -215,9 +257,36 @@ func toFloat64(src driver.Value) (float64, error) {
 		return strconv.ParseFloat(string(s), 64)
 	case string:
 		return strconv.ParseFloat(s, 64)
+	}
+
+	value := reflect.ValueOf(src)
+	switch value.Kind() {
+	case reflect.Float32, reflect.Float64:
+		return value.Float(), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(value.Int()), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(value.Uint()), nil
+	case reflect.String:
+		return strconv.ParseFloat(value.String(), 64)
 	default:
 		return 0, fmt.Errorf("%w: cannot read %T as a float", ErrScan, src)
 	}
+}
+
+// toUint64 preserves the full unsigned range, which routing through int64 would
+// lose for anything above math.MaxInt64.
+func toUint64(src driver.Value) (uint64, error) {
+	value := reflect.ValueOf(src)
+	if value.Kind() >= reflect.Uint && value.Kind() <= reflect.Uint64 {
+		return value.Uint(), nil
+	}
+
+	signed, err := toInt64(src)
+	if err != nil {
+		return 0, err
+	}
+	return uint64(signed), nil
 }
 
 // stringify renders a driver value as text.

@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -71,6 +73,75 @@ func TestAssignEveryIntegerWidth(t *testing.T) {
 	}
 	if u != 9 || u8 != 9 || u16 != 9 || u32 != 9 || u64 != 9 {
 		t.Errorf("unsigned widths did not all take the value")
+	}
+}
+
+// database/sql documents driver.Value as a narrow set, but the type is an `any`
+// and a driver with a richer type system hands back its own native types.
+// ClickHouse returns uint8 for a boolean-ish column and uint64 for an unsigned
+// integer, so even `SELECT 1` arrives as a uint8 — which used to fail outright.
+func TestAssignDriverNativeTypes(t *testing.T) {
+	t.Parallel()
+
+	natives := []driver.Value{
+		uint8(7), uint16(7), uint32(7), uint64(7), uint(7),
+		int8(7), int16(7), int32(7), int(7),
+		float32(7),
+	}
+
+	for _, src := range natives {
+		t.Run(fmt.Sprintf("%T", src), func(t *testing.T) {
+			t.Parallel()
+
+			var signed int64
+			if err := assign(&signed, src); err != nil || signed != 7 {
+				t.Errorf("into int64: %v, %v", signed, err)
+			}
+
+			var unsigned uint64
+			if err := assign(&unsigned, src); err != nil || unsigned != 7 {
+				t.Errorf("into uint64: %v, %v", unsigned, err)
+			}
+
+			var ratio float64
+			if err := assign(&ratio, src); err != nil || ratio != 7 {
+				t.Errorf("into float64: %v, %v", ratio, err)
+			}
+
+			var text string
+			if err := assign(&text, src); err != nil {
+				t.Errorf("into string: %v", err)
+			}
+		})
+	}
+}
+
+// A boolean column arriving as a native unsigned type must still land as a bool.
+func TestAssignBoolFromNativeUnsigned(t *testing.T) {
+	t.Parallel()
+
+	var flag bool
+	if err := assign(&flag, uint8(1)); err != nil || !flag {
+		t.Errorf("assign(uint8(1)) = %v, %v", flag, err)
+	}
+	if err := assign(&flag, uint8(0)); err != nil || flag {
+		t.Errorf("assign(uint8(0)) = %v, %v", flag, err)
+	}
+}
+
+// Routing an unsigned value through int64 would lose everything above
+// math.MaxInt64, which is a real range for a UInt64 or BIGINT UNSIGNED column.
+func TestAssignPreservesFullUnsignedRange(t *testing.T) {
+	t.Parallel()
+
+	const huge = uint64(math.MaxUint64) - 1
+
+	var got uint64
+	if err := assign(&got, huge); err != nil {
+		t.Fatalf("assign() = %v", err)
+	}
+	if got != huge {
+		t.Fatalf("got %d, want %d - the value was truncated through int64", got, huge)
 	}
 }
 

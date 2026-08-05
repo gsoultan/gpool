@@ -1,13 +1,13 @@
-# Gpool: A Go Connection Pooling & CDC Library for PostgreSQL
+# Gpool: A Go Connection Pooling & CDC Library
 
-Gpool is a Go 1.26-native **library** for PostgreSQL connection pooling and Change Data Capture
-(CDC). It is designed to be embedded in your application or composed into another library — there
+Gpool is a Go 1.26-native **library** for connection pooling — PostgreSQL, MySQL, MariaDB,
+SQL Server and ClickHouse — with Change Data Capture for PostgreSQL. It is designed to be embedded in your application or composed into another library — there
 is no daemon, no CLI, no config file, no logger, and no process-global state.
 
 ## 📦 Installation
 
 ```bash
-go get github.com/gsoultan/gpool@v0.1.0
+go get github.com/gsoultan/gpool@v0.2.0
 ```
 
 While the major version is `0` the API may change in a minor release, so pin an
@@ -35,15 +35,22 @@ behaviour:
 | PostgreSQL | `github.com/gsoultan/gpool` | `pgx/v5` | ✅ logical replication |
 | MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | — |
 | MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | — |
+| SQL Server | `github.com/gsoultan/gpool/vendors/mssql` | `microsoft/go-mssqldb` | — |
+| ClickHouse | `github.com/gsoultan/gpool/vendors/clickhouse` | `clickhouse-go/v2` | — |
 
 Each non-PostgreSQL vendor is **its own Go module**. That is deliberate: a consumer
 using only PostgreSQL never downloads the MySQL driver, and `govulncheck` never flags a
 CVE in a driver you do not import. The cost is a `go get` per vendor.
 
 ```bash
-go get github.com/gsoultan/gpool                # PostgreSQL, and the interfaces
-go get github.com/gsoultan/gpool/vendors/mysql  # MySQL and MariaDB
+go get github.com/gsoultan/gpool                     # PostgreSQL, and the interfaces
+go get github.com/gsoultan/gpool/vendors/mysql       # MySQL and MariaDB
+go get github.com/gsoultan/gpool/vendors/mssql       # SQL Server
+go get github.com/gsoultan/gpool/vendors/clickhouse  # ClickHouse
 ```
+
+The weight this saves is real: the core resolves 20 modules, while ClickHouse alone
+brings 89. A PostgreSQL consumer pays for none of them.
 
 `pkg/pooling` and `pkg/sqldriver` live in the core module and depend on nothing beyond
 the standard library, which is what keeps each vendor module thin.
@@ -412,6 +419,51 @@ with the native vendors.
 > A transaction the caller abandons is rolled back on release. `go-sql-driver`'s own
 > `ResetSession` does **not** do this, so without the gate the next caller inherits the
 > uncommitted work — verified by removing the gate and watching the row survive.
+
+## 🏢 SQL Server and ClickHouse
+
+Both follow the same shape as MySQL — a DSN plus the pooling knobs, registered under
+their own vendor name.
+
+```go
+import "github.com/gsoultan/gpool/vendors/mssql"
+
+pool, err := mssql.New(mssql.Config{
+    // The ADO form, server=host;user id=...;, is accepted too.
+    DSN:      "sqlserver://user:pass@localhost:1433?database=app",
+    MaxConns: 50,
+})
+```
+
+SQL Server uses `@p1`-style ordinal placeholders rather than `?` or `$1`.
+
+```go
+import "github.com/gsoultan/gpool/vendors/clickhouse"
+
+pool, err := clickhouse.New(clickhouse.Config{
+    DSN:      "clickhouse://default:pass@localhost:9000/analytics",
+    MaxConns: 8, // sized to what the cluster can run at once, not to client concurrency
+})
+```
+
+ClickHouse is an analytical column store, so two things differ from the
+transactional engines:
+
+- **Transactions are not generally available.** `Begin` fails unless the server has
+  experimental transaction support enabled. gpool reports the server's refusal rather
+  than papering over it, and the connection stays usable afterwards.
+- **Insert in batches.** One row per `INSERT` is pathological against a column store;
+  use one statement carrying many rows.
+- **Size the pool to the server.** ClickHouse spends real memory per concurrent query,
+  so a large pool against a small cluster trades queueing in your process for pressure
+  on the cluster.
+
+`Options` is available for what a DSN cannot express — compression, TLS, several hosts
+for failover:
+
+```go
+clickhouse.Config{Options: &clickhousego.Options{ /* ... */ }, MaxConns: 8}
+```
 
 ## 🗄️ Multiple Databases
 
