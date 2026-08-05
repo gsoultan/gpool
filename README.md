@@ -22,11 +22,12 @@ behaviour:
 | Package | Contents |
 | :--- | :--- |
 | `pkg/gpool` | `Pool`, `Conn`, `Tx`, `Rows`, `Row`, `Result`, `Stat`, `Engine`, vendor registry, and the optional capabilities `BulkCopier`, `Batcher`, `Notifier` |
-| `pkg/gpool/cdc` | `Subscriber` = `Stream` + `TableManager` + `ReplicationManager`, plus `EventStream` and `Event` |
+| `pkg/gpool/cdc` | `Subscriber` = `Stream` + `TableManager` + `Close`, plus `EventStream`, `Event`, `Position`, and the optional capability `ReplicationManager` |
 | `pkg/pooling` | The pooling engine: capacity, lock-striped idle buckets, reaper, lifecycle, statistics |
 | `pkg/sqldriver` | Shared pooling for any `database/sql` driver (standard library only) |
 | `pkg/vendors/postgres/pool` | PostgreSQL pool implementation (`pgx/v5`) |
 | `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation (`pglogrepl`) |
+| `vendors/mysql/cdc` | MySQL and MariaDB binary-log implementation (`go-mysql`), its own module |
 
 ### Supported databases
 
@@ -49,10 +50,11 @@ using only PostgreSQL never downloads the MySQL driver, and `govulncheck` never 
 CVE in a driver you do not import. The cost is a `go get` per vendor.
 
 ```bash
-go get github.com/gsoultan/gpool                     # PostgreSQL, and the interfaces
-go get github.com/gsoultan/gpool/vendors/mysql       # MySQL and MariaDB
-go get github.com/gsoultan/gpool/vendors/mssql       # SQL Server
-go get github.com/gsoultan/gpool/vendors/clickhouse  # ClickHouse
+go get github.com/gsoultan/gpool                       # PostgreSQL pool + CDC, and the interfaces
+go get github.com/gsoultan/gpool/vendors/mysql         # MySQL and MariaDB pool
+go get github.com/gsoultan/gpool/vendors/mysql/cdc     # MySQL and MariaDB CDC (binary log)
+go get github.com/gsoultan/gpool/vendors/mssql         # SQL Server
+go get github.com/gsoultan/gpool/vendors/clickhouse    # ClickHouse
 ```
 
 The weight this saves is real: the core resolves 20 modules, while ClickHouse alone
@@ -223,52 +225,12 @@ preserves them.
 
 ## ⚡ CDC Streaming
 
-### Positions and resuming
+Two vendors implement change data capture behind one interface: PostgreSQL over
+logical replication, MySQL and MariaDB over the binary log. Both are reached
+through the same factory, and a vendor that has a pool but no CDC says so with
+`ErrNoCDCSupport` rather than suggesting an import that would not help.
 
-Every event carries a `Position` — an opaque, vendor-defined marker. Record it,
-hand it back to `SubscribeFrom`, and the stream resumes:
-
-```go
-for event := range stream.All() {
-    process(event)
-    checkpoint = event.Position   // persist this
-}
-...
-stream, err := subscriber.SubscribeFrom(ctx, checkpoint)
-```
-
-Resuming starts **at or before** the change the position came from, never after
-it. A resumed stream may repeat what it already delivered but never skips, which
-is what carries at-least-once delivery across a restart — so a consumer that must
-not process a change twice needs its own idempotency.
-
-The difference between vendors is not cosmetic and loses data if assumed away:
-
-| | PostgreSQL | MySQL |
-| :--- | :--- | :--- |
-| who records your position | the server, in the slot | nobody |
-| `Subscribe()` with no position | resumes from the slot, losing nothing | starts at the **end of the log**, skipping everything since |
-| resuming needs client state | no | **yes** — only `SubscribeFrom` |
-| falling behind costs | the primary's disk fills | the logs expire and **changes are lost** |
-
-PostgreSQL additionally refuses `SubscribeFrom` with a position behind the slot's
-confirmed position (`ErrPositionBehindSlot`), because the server would silently
-clamp to the slot and serve a stream with a hole in it.
-
-### Slot administration is optional
-
-`cdc.Subscriber` is `Stream` + `TableManager` + `Close`. Replication slots and
-publications are PostgreSQL's model — MySQL has no equivalent at all — so they
-live in a separate interface reached by type assertion, the same way `BulkCopier`
-and `Notifier` do:
-
-```go
-if slots, ok := subscriber.(cdc.ReplicationManager); ok {
-    err := slots.CreateSlot(ctx, "orders")
-}
-```
-
-A failed assertion means "this engine has no such objects", not an error.
+### PostgreSQL
 
 ```go
 import (
@@ -296,8 +258,8 @@ if err != nil {
 defer stream.Close()
 
 for event := range stream.All() {
-    fmt.Printf("%s %s.%s lsn=%d after=%v\n",
-        event.Op, event.Schema, event.Table, event.LSN, event.After)
+    fmt.Printf("%s %s.%s at=%s after=%v\n",
+        event.Op, event.Schema, event.Table, event.Position, event.After)
 }
 return stream.Err()
 ```
@@ -316,77 +278,182 @@ additionally needs ownership of the tables.
 > an ordinary connection issuing discrete statements with unnamed parameter binding, so it holds no
 > server-side prepared statements and is safe through a pooler in transaction mode.
 
+### MySQL and MariaDB
+
+```go
+import (
+    "github.com/gsoultan/gpool/pkg/gpool"
+    mysqlpool "github.com/gsoultan/gpool/vendors/mysql"
+    mysqlcdc "github.com/gsoultan/gpool/vendors/mysql/cdc"
+)
+
+subscriber, err := gpool.NewSubscriber(mysqlpool.MySQL, mysqlcdc.Config{
+    DSN:      "repl:pass@tcp(localhost:3306)/app",
+    ServerID: 1001,                        // must be unique among the source's replicas
+    Tables:   []string{"app.users"},       // empty captures every table
+})
+if err != nil {
+    return err
+}
+defer subscriber.Close()
+
+// Subscribe() starts at the end of the log. Resume from what you last stored.
+stream, err := subscriber.SubscribeFrom(ctx, checkpoint)
+if err != nil {
+    return err
+}
+defer stream.Close()
+
+for event := range stream.All() {
+    process(event)
+    save(event.Position)   // durably, before treating the change as done
+}
+return stream.Err()
+```
+
+Both imports are needed: the CDC package registers the subscriber, the pool package names the
+vendor. `mysqlpool.MariaDB` works the same way.
+
+Requires `binlog_format=ROW` and an account with `REPLICATION SLAVE`, plus `SELECT` on
+`information_schema` to resolve column names. It does **not** need `SUPER`.
+
+> **Set `binlog_row_metadata=FULL` if you can.** A binlog row is a list of values with no names
+> attached. Under `FULL` the names travel in the log itself, which is correct by construction even
+> for rows written before a later `ALTER TABLE`. Under the default `MINIMAL` they are read from
+> `information_schema`, which describes the table *now* — and a column count that disagrees is
+> reported as `ErrSchemaMismatch` rather than handing you values under names that may not be theirs.
+
+> **`ServerID` has no default, deliberately.** The source treats a subscriber as a replica, and two
+> consumers sharing an ID make it disconnect one of them repeatedly without explaining why.
+
+### Positions and resuming
+
+Every event carries a `Position` — an opaque, vendor-defined marker. Record it,
+hand it back to `SubscribeFrom`, and the stream resumes:
+
+```go
+for event := range stream.All() {
+    process(event)
+    checkpoint = event.Position   // persist this
+}
+...
+stream, err := subscriber.SubscribeFrom(ctx, checkpoint)
+```
+
+Resuming starts **at or before** the change the position came from, never after
+it. A resumed stream may repeat what it already delivered but never skips, which
+is what carries at-least-once delivery across a restart — so a consumer that must
+not process a change twice needs its own idempotency.
+
+The difference between vendors is not cosmetic and loses data if assumed away:
+
+| | PostgreSQL | MySQL |
+| :--- | :--- | :--- |
+| who records your position | the server, in the slot | nobody |
+| `Subscribe()` with no position | resumes from the slot, losing nothing | starts at the **end of the log**, skipping everything since |
+| resuming needs client state | no | **yes** — only `SubscribeFrom` |
+| falling behind costs | the primary's disk fills | the logs expire and **changes are lost** |
+| what a position looks like | `0/1A2B3C4D` | `gtid:3E11FA47-…:1-5` or `file:mysql-bin.000042:1234` |
+
+Positions are opaque and vendor-specific: never compare two from different vendors, and do not
+assume they sort lexically. Passing one vendor's position to another's `SubscribeFrom` is refused
+rather than coerced.
+
+PostgreSQL additionally refuses `SubscribeFrom` with a position behind the slot's
+confirmed position (`ErrPositionBehindSlot`), because the server would silently
+clamp to the slot and serve a stream with a hole in it.
+
 ### Delivery semantics
 
-Delivery is **at-least-once**. The stream confirms a WAL position to the server only after the
-iterator body for that event has returned, so a crash mid-processing replays the event rather than
-losing it.
+Delivery is **at-least-once**, on both vendors — but what backs it differs.
 
-The corollary: a consumer that hands work to another goroutine and returns immediately has
-confirmed work it has not done. Either finish processing before returning from the loop body, or
-persist `Event.LSN` yourself and pass it back as `Config.StartLSN` on the next run.
+On PostgreSQL the stream confirms a position to the server only after the iterator body for that
+event has returned, so a crash mid-processing replays rather than loses. The corollary is that a
+consumer which hands work to another goroutine and returns immediately has confirmed work it has
+not done: either finish processing inside the loop body, or record `Event.Position` yourself.
 
-`Config.StartLSN` defaults to `0`, which resumes from the slot's `confirmed_flush_lsn` — that is,
-it replays everything the slot retained while the consumer was away.
+On MySQL there is nothing to confirm — the source keeps no per-consumer state — so your stored
+`Event.Position` is the *only* record of progress. Store it before treating a change as processed.
 
-> **Replication slots retain WAL.** A consumer that stops draining grows the primary's disk usage
-> until it fills. Slots are never dropped automatically; use `DropSlot` deliberately when you are
-> done with one. During idle periods the stream advances its confirmed position from the server's
-> keepalives, so a quiet publication does not pin WAL.
+> **Replication slots retain WAL.** A PostgreSQL consumer that stops draining grows the primary's
+> disk usage until it fills. Slots are never dropped automatically; drop one deliberately when you
+> are done with it. During idle periods the stream advances its confirmed position from the
+> server's keepalives, so a quiet publication does not pin WAL.
+>
+> **Binary logs expire.** A MySQL consumer that falls behind `binlog_expire_logs_seconds` loses the
+> changes outright — the opposite failure mode, and the quieter one.
 
 ### Event shape
 
 ```go
 type Event struct {
-    Op     Op                // OpInsert, OpUpdate, OpDelete
-    Schema string
-    Table  string
-    LSN    uint64            // WAL position immediately after this record
-    Before map[string]any    // Update and Delete, subject to REPLICA IDENTITY
-    After  map[string]any    // Insert and Update
+    Op       Op                // OpInsert, OpUpdate, OpDelete
+    Schema   string
+    Table    string
+    Position Position          // opaque; record it and pass it to SubscribeFrom
+    Before   map[string]any    // Update and Delete
+    After    map[string]any    // Insert and Update
 }
 ```
 
 - `Before` and `After` are allocated per event and owned by you. They are safe to retain and to
   send to another goroutine.
-- Values are `string`, exactly as `pgoutput` transmits them in text format. The replication stream
-  does not carry the destination Go type, so decoding is left to the consumer.
-- A column **absent** from the map was not transmitted: either `REPLICA IDENTITY` does not cover it,
-  or it is an unchanged TOASTed value. That is distinct from a key present with a `nil` value,
-  which is a real SQL `NULL`. Writing an absent column as `NULL` would blank it on replay.
-- `Before` is `nil` under `REPLICA IDENTITY DEFAULT` unless the key changed. Use
-  `ALTER TABLE ... REPLICA IDENTITY FULL` for a complete before-image.
+- **Value types differ by vendor.** PostgreSQL delivers every value as a `string`, exactly as
+  `pgoutput` transmits it in text format — the replication stream does not carry the destination Go
+  type. MySQL delivers the binlog parser's native types (`int64`, `float64`, `string`, `time.Time`),
+  with byte slices copied into strings.
+- A column **absent** from the map was not transmitted. On PostgreSQL that means either
+  `REPLICA IDENTITY` does not cover it or it is an unchanged TOASTed value. That is distinct from a
+  key present with a `nil` value, which is a real SQL `NULL`. Writing an absent column as `NULL`
+  would blank it on replay.
+- On PostgreSQL `Before` is `nil` under `REPLICA IDENTITY DEFAULT` unless the key changed; use
+  `ALTER TABLE ... REPLICA IDENTITY FULL` for a complete before-image. MySQL's `ROW` format carries
+  the full before-image by default.
 
 ### Table management
-
-Table management runs on a separate control connection, so it is safe while a stream is live:
 
 ```go
 err := subscriber.AddTables(ctx, "public.orders", "public.products")
 err  = subscriber.RemoveTables(ctx, "public.products")
 err  = subscriber.SyncTables(ctx, "public.users", "public.orders") // reconcile to an exact list
 
-tracking := subscriber.IsTracking("public.users") // local view
-tables   := subscriber.GetTables()                // local copy
-ok, err  := subscriber.VerifyTable(ctx, "public.users") // queries pg_publication_tables
+tracking := subscriber.IsTracking("public.users")
+tables   := subscriber.GetTables()
+ok, err  := subscriber.VerifyTable(ctx, "public.users")
 ```
 
-The local tracking list is updated only after the server accepts the change, so `IsTracking` never
-reports a table the publication does not actually have. Already-tracked additions and untracked
-removals are skipped rather than sent.
+Both vendors apply these to a live stream, but they mean different things underneath.
 
-Table names may be schema-qualified; the schema and table parts are quoted separately.
+On PostgreSQL they are `ALTER PUBLICATION` against the server, run on a separate control connection
+so they are safe while a stream is live. The local tracking list is updated only after the server
+accepts the change, so `IsTracking` never reports a table the publication does not have, and
+`VerifyTable` queries `pg_publication_tables` for the real answer.
 
-### Slot and publication lifecycle
+On MySQL there is no subscription to alter, so the filter is applied by the consumer — the whole
+binary log crosses the network either way, and an empty table list captures everything.
+`VerifyTable` can only confirm the table exists.
+
+### Slot administration is optional
+
+`cdc.Subscriber` is `Stream` + `TableManager` + `Close`. Replication slots and
+publications are PostgreSQL's model — MySQL has no equivalent at all — so they
+live in a separate interface reached by type assertion, the same way `BulkCopier`
+and `Notifier` do:
 
 ```go
-err := subscriber.CreateSlot(ctx, "manual_slot")      // no-op if it exists
-err  = subscriber.DropSlot(ctx, "manual_slot")        // no-op if it does not
-err  = subscriber.CreatePublication(ctx, "manual_pub", "public.t1", "public.t2")
-err  = subscriber.DropPublication(ctx, "manual_pub")
+if slots, ok := subscriber.(cdc.ReplicationManager); ok {
+    err := slots.CreateSlot(ctx, "manual_slot")        // no-op if it exists
+    err  = slots.DropSlot(ctx, "manual_slot")          // no-op if it does not
+    err  = slots.CreatePublication(ctx, "manual_pub", "public.t1", "public.t2")
+    err  = slots.DropPublication(ctx, "manual_pub")
+}
 ```
 
+A failed assertion means "this engine has no such objects", not an error.
+
 ### CDC configuration
+
+PostgreSQL (`postgrescdc.Config`):
 
 | Field | Default | Notes |
 | :--- | :--- | :--- |
@@ -394,8 +461,20 @@ err  = subscriber.DropPublication(ctx, "manual_pub")
 | `SlotName` | required | Must match `[a-z0-9_]{1,63}` — PostgreSQL's own rule |
 | `PublicationName` | required | |
 | `Tables` | required with `CreatePublication` | |
-| `StartLSN` | `0` | Resume from the slot's confirmed position |
+| `StartLSN` | `0` | Resume from the slot's confirmed position; `SubscribeFrom` overrides it |
 | `StandbyInterval` | `10s` | Must stay well under the server's `wal_sender_timeout` |
+| `Buffer` | `256` | Read-ahead depth in events |
+
+MySQL and MariaDB (`mysqlcdc.Config`):
+
+| Field | Default | Notes |
+| :--- | :--- | :--- |
+| `DSN` | required | go-sql-driver format; must be `tcp` |
+| `ServerID` | required | Unique across every replica and CDC consumer of the source |
+| `Tables` | all tables | `schema.table`; filtered client-side |
+| `Flavor` | `mysql` | Or `mariadb` — the two write GTIDs differently |
+| `HeartbeatPeriod` | `30s` | How often an idle source is asked to prove it is alive |
+| `ReadTimeout` | `90s` | Must exceed `HeartbeatPeriod` |
 | `Buffer` | `256` | Read-ahead depth in events |
 
 Only one stream may be open per subscriber; a second `Subscribe` returns `ErrAlreadySubscribed`.
