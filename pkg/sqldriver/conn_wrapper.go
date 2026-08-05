@@ -15,12 +15,12 @@ import (
 // by user code, so pooling it would let a second Release hand a live connection
 // back while another goroutine is still using it.
 type connWrapper struct {
-	handle *pooling.Handle[*conn]
+	handle pooling.Handle[*conn]
 }
 
 var _ gpool.Conn = (*connWrapper)(nil)
 
-func newConnWrapper(handle *pooling.Handle[*conn]) *connWrapper {
+func newConnWrapper(handle pooling.Handle[*conn]) *connWrapper {
 	return &connWrapper{handle: handle}
 }
 

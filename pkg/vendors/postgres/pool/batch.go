@@ -27,5 +27,5 @@ func (c *connWrapper) SendBatch(ctx context.Context, batch *gpool.Batch) gpool.B
 	for _, query := range batch.Queries() {
 		pgBatch.Queue(query.SQL, query.Arguments...)
 	}
-	return &batchResults{results: c.conn.SendBatch(ctx, pgBatch)}
+	return &batchResults{results: c.pgx().SendBatch(ctx, pgBatch)}
 }

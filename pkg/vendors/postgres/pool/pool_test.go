@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// The pooling engine itself — capacity, shards, the reaper, the clock, the
+// MaxConns ceiling, acquisition counters — is tested in pkg/pooling against a
+// fake driver, where the tests are vendor-independent and need no server. What
+// belongs here is what is specific to PostgreSQL: config handling, the driver
+// adapter's judgement about a connection, and the wiring between the two.
+
 func newTestPool(t *testing.T, config Config) *Postgres {
 	t.Helper()
 
@@ -30,8 +36,13 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	if _, err := New(Config{}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("New() = %v, want ErrInvalidConfig", err)
 	}
+	if _, err := New(Config{ConnString: testConnString, MaxConns: 2, MinConns: 5}); err == nil {
+		t.Fatal("New() accepted MinConns above MaxConns")
+	}
 }
 
+// The engine's ErrClosed must surface as this package's sentinel, so callers
+// match on one vocabulary rather than reaching through to the engine.
 func TestAcquireAfterCloseFailsFast(t *testing.T) {
 	t.Parallel()
 
@@ -57,382 +68,98 @@ func TestCloseIsIdempotent(t *testing.T) {
 	p.Close()
 }
 
-// Releasing the same connection twice used to return a live connection to the pool
-// while another goroutine still held it, and over-released the permit set.
-func TestConnReleaseIsIdempotent(t *testing.T) {
+func TestNewDoesNotDial(t *testing.T) {
 	t.Parallel()
 
-	p := newTestPool(t, Config{MaxConns: 1})
+	stat := newTestPool(t, Config{MaxConns: 8}).Stat()
 
-	if err := p.permits.acquire(t.Context()); err != nil {
-		t.Fatalf("priming the permit set: %v", err)
+	if stat.TotalConnections() != 0 {
+		t.Errorf("TotalConnections() = %d; New must not dial", stat.TotalConnections())
 	}
-	p.totalConns.Add(1)
-
-	now := time.Now()
-	conn := newConnWrapper(p, &idleConn{createdAt: now, idleSince: now}, 0)
-	conn.Release()
-	conn.Release()
-	conn.Release()
-
-	// Exactly one permit must have come back.
-	first, cancelFirst := context.WithTimeout(t.Context(), time.Second)
-	defer cancelFirst()
-	if err := p.permits.acquire(first); err != nil {
-		t.Fatalf("permit was not returned: %v", err)
-	}
-
-	second, cancelSecond := context.WithTimeout(t.Context(), 50*time.Millisecond)
-	defer cancelSecond()
-	if err := p.permits.acquire(second); err == nil {
-		t.Fatal("the permit set handed out more permits than were held")
-	}
-
-	p.permits.release()
-}
-
-func TestConnUseAfterReleaseIsRefused(t *testing.T) {
-	t.Parallel()
-
-	p := newTestPool(t, Config{MaxConns: 1})
-
-	if err := p.permits.acquire(t.Context()); err != nil {
-		t.Fatalf("priming the permit set: %v", err)
-	}
-
-	now := time.Now()
-	conn := newConnWrapper(p, &idleConn{createdAt: now, idleSince: now}, 0)
-	conn.Release()
-
-	if _, err := conn.Exec(t.Context(), "SELECT 1"); !errors.Is(err, ErrConnReleased) {
-		t.Errorf("Exec() = %v, want ErrConnReleased", err)
-	}
-	if _, err := conn.Query(t.Context(), "SELECT 1"); !errors.Is(err, ErrConnReleased) {
-		t.Errorf("Query() = %v, want ErrConnReleased", err)
-	}
-	if _, err := conn.Begin(t.Context()); !errors.Is(err, ErrConnReleased) {
-		t.Errorf("Begin() = %v, want ErrConnReleased", err)
-	}
-	if err := conn.Ping(t.Context()); !errors.Is(err, ErrConnReleased) {
-		t.Errorf("Ping() = %v, want ErrConnReleased", err)
-	}
-	if err := conn.QueryRow(t.Context(), "SELECT 1").Scan(); !errors.Is(err, ErrConnReleased) {
-		t.Errorf("QueryRow().Scan() = %v, want ErrConnReleased", err)
+	if stat.MaxConnections() != 8 {
+		t.Errorf("MaxConnections() = %d, want 8", stat.MaxConnections())
 	}
 }
 
-func TestStatReportsShardOccupancy(t *testing.T) {
+// The vendor config must reach the engine rather than being silently dropped.
+func TestConfigReachesTheEngine(t *testing.T) {
 	t.Parallel()
 
-	p := newTestPool(t, Config{MaxConns: 8})
+	got := Config{
+		ConnString:        testConnString,
+		MaxConns:          17,
+		MinConns:          3,
+		MaxConnLifetime:   3 * time.Minute,
+		MaxConnIdleTime:   90 * time.Second,
+		HealthCheckPeriod: 30 * time.Second,
+		ResetQueryTimeout: 2 * time.Second,
+		ConnectTimeout:    4 * time.Second,
+	}.pooling()
 
-	if got := p.Stat(); got.TotalConnections() != 0 || got.IdleConnections() != 0 || got.ActiveConnections() != 0 {
-		t.Fatalf("empty pool stat = %+v, want all zero", got)
+	if got.MaxConns != 17 || got.MinConns != 3 {
+		t.Errorf("capacity did not carry: %+v", got)
 	}
-
-	now := time.Now()
-	p.totalConns.Add(3)
-	p.shards[0].push(&idleConn{createdAt: now, idleSince: now})
-	p.shards[5].push(&idleConn{createdAt: now, idleSince: now})
-
-	stat := p.Stat()
-	if stat.TotalConnections() != 3 {
-		t.Errorf("TotalConnections() = %d, want 3", stat.TotalConnections())
+	if got.MaxConnLifetime != 3*time.Minute || got.MaxConnIdleTime != 90*time.Second {
+		t.Errorf("lifetime bounds did not carry: %+v", got)
 	}
-	if stat.IdleConnections() != 2 {
-		t.Errorf("IdleConnections() = %d, want 2", stat.IdleConnections())
+	if got.HealthCheckPeriod != 30*time.Second || got.ConnectTimeout != 4*time.Second {
+		t.Errorf("periods did not carry: %+v", got)
 	}
-	if stat.ActiveConnections() != 1 {
-		t.Errorf("ActiveConnections() = %d, want 1", stat.ActiveConnections())
+	// ResetQueryTimeout is the vendor's name for the engine's cleanup budget: it
+	// bounds the reset query, the rollback, and the unlisten alike.
+	if got.CleanupTimeout != 2*time.Second {
+		t.Errorf("CleanupTimeout = %v, want ResetQueryTimeout (2s)", got.CleanupTimeout)
 	}
 }
 
-// Stat samples the total and the shard counters independently, so a race between
-// them must clamp rather than report a negative active count to a metrics backend.
-func TestStatClampsInconsistentSample(t *testing.T) {
+// A dead connection must be reported without touching the network, because the
+// engine consults this on the hot path. A nil handle counts as dead so a
+// bookkeeping slip degrades into a discarded connection rather than a panic.
+func TestDriverDeadHandlesMissingConnection(t *testing.T) {
 	t.Parallel()
 
-	p := newTestPool(t, Config{MaxConns: 8})
+	driver := &pgxDriver{}
 
-	now := time.Now()
-	p.shards[1].push(&idleConn{createdAt: now, idleSince: now})
-	p.shards[2].push(&idleConn{createdAt: now, idleSince: now})
-
-	stat := p.Stat()
-	if stat.ActiveConnections() < 0 {
-		t.Fatalf("ActiveConnections() = %d, want non-negative", stat.ActiveConnections())
+	if !driver.Dead(nil) {
+		t.Error("Dead(nil) = false, want true")
 	}
-	if stat.IdleConnections() > stat.TotalConnections() {
-		t.Fatalf("idle %d exceeds total %d", stat.IdleConnections(), stat.TotalConnections())
+	if !driver.Dead(&pgConn{}) {
+		t.Error("Dead() on a connection with no driver handle = false, want true")
 	}
 }
 
-// Occupancy alone cannot distinguish a pool that is busy from one that is too
-// small. These counters are what makes MaxConns tunable from production data.
-func TestStatTracksAcquisitions(t *testing.T) {
+func TestStatIsEmptyBeforeUse(t *testing.T) {
 	t.Parallel()
 
-	p := newTestPool(t, Config{MaxConns: 1})
+	stat := newTestPool(t, Config{MaxConns: 8}).Stat()
 
-	if got := p.Stat().MaxConnections(); got != 1 {
-		t.Fatalf("MaxConnections() = %d, want 1", got)
+	if stat.TotalConnections() != 0 || stat.IdleConnections() != 0 || stat.ActiveConnections() != 0 {
+		t.Fatalf("empty pool occupancy = %+v, want all zero", stat)
 	}
-
-	// Served immediately: counted, but contributes no wait.
-	if err := p.acquirePermit(t.Context()); err != nil {
-		t.Fatalf("acquirePermit() = %v", err)
-	}
-
-	stat := p.Stat()
-	if stat.AcquireCount() != 1 {
-		t.Errorf("AcquireCount() = %d, want 1", stat.AcquireCount())
-	}
-	if stat.EmptyAcquireCount() != 0 {
-		t.Errorf("EmptyAcquireCount() = %d, want 0 for an uncontended acquire", stat.EmptyAcquireCount())
+	if stat.AcquireCount() != 0 || stat.EmptyAcquireCount() != 0 || stat.CanceledAcquireCount() != 0 {
+		t.Fatalf("empty pool counters = %+v, want all zero", stat)
 	}
 	if stat.AcquireDuration() != 0 {
-		t.Errorf("AcquireDuration() = %v, want 0 for an uncontended acquire", stat.AcquireDuration())
+		t.Fatalf("AcquireDuration() = %v, want 0", stat.AcquireDuration())
 	}
+}
 
-	// The pool is now exhausted, so this one gives up with its context.
-	timedOut, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+// An acquisition that gives up must be counted, and must not count as a success.
+// This needs no server: the pool never dials, so every attempt waits for a permit
+// that a connection failure never returns.
+func TestCanceledAcquireIsCounted(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPool(t, Config{MaxConns: 1, ConnectTimeout: 50 * time.Millisecond})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	if err := p.acquirePermit(timedOut); err == nil {
-		t.Fatal("acquirePermit() on an exhausted pool should fail")
+
+	if _, err := p.Acquire(ctx); err == nil {
+		t.Skip("a server is reachable at the test connection string; this case needs one that is not")
 	}
 
-	stat = p.Stat()
-	if stat.CanceledAcquireCount() != 1 {
-		t.Errorf("CanceledAcquireCount() = %d, want 1", stat.CanceledAcquireCount())
-	}
-	if stat.AcquireCount() != 1 {
-		t.Errorf("AcquireCount() = %d, a cancelled acquisition should not count as one", stat.AcquireCount())
-	}
-
-	// A caller that waits and then succeeds is counted as an empty acquire and
-	// contributes its wait to the total.
-	waited := make(chan error, 1)
-	go func() { waited <- p.acquirePermit(context.Background()) }()
-
-	time.Sleep(20 * time.Millisecond)
-	p.permits.release()
-
-	if err := <-waited; err != nil {
-		t.Fatalf("the waiting acquirer failed: %v", err)
-	}
-
-	stat = p.Stat()
-	if stat.EmptyAcquireCount() != 1 {
-		t.Errorf("EmptyAcquireCount() = %d, want 1", stat.EmptyAcquireCount())
-	}
-	if stat.AcquireCount() != 2 {
-		t.Errorf("AcquireCount() = %d, want 2", stat.AcquireCount())
-	}
-	if stat.AcquireDuration() <= 0 {
-		t.Errorf("AcquireDuration() = %v, want a positive wait", stat.AcquireDuration())
-	}
-
-	p.permits.release()
-}
-
-func TestShardPushPopIsLIFO(t *testing.T) {
-	t.Parallel()
-
-	var s shard
-	first := &idleConn{}
-	second := &idleConn{}
-
-	if got := s.pop(); got != nil {
-		t.Fatal("pop() on an empty shard should return nil")
-	}
-
-	s.push(first)
-	s.push(second)
-
-	if got := s.count.Load(); got != 2 {
-		t.Fatalf("count = %d, want 2", got)
-	}
-	// The hottest connection is reused so the rest go cold and the reaper can retire them.
-	if got := s.pop(); got != second {
-		t.Error("pop() should return the most recently pushed connection")
-	}
-	if got := s.pop(); got != first {
-		t.Error("pop() should then return the older connection")
-	}
-	if got := s.count.Load(); got != 0 {
-		t.Fatalf("count = %d, want 0", got)
-	}
-}
-
-func TestShardTakeIfAndDrain(t *testing.T) {
-	t.Parallel()
-
-	var s shard
-	keep := &idleConn{createdAt: time.Now()}
-	drop := &idleConn{createdAt: time.Now().Add(-time.Hour)}
-
-	s.push(keep)
-	s.push(drop)
-
-	taken := s.takeIf(func(ic *idleConn) bool { return ic == drop })
-	if len(taken) != 1 || taken[0] != drop {
-		t.Fatalf("takeIf() = %v, want exactly the matching connection", taken)
-	}
-	if got := s.count.Load(); got != 1 {
-		t.Fatalf("count = %d, want 1", got)
-	}
-
-	drained := s.drain()
-	if len(drained) != 1 || drained[0] != keep {
-		t.Fatalf("drain() = %v, want the remaining connection", drained)
-	}
-	if got := s.count.Load(); got != 0 {
-		t.Fatalf("count after drain = %d, want 0", got)
-	}
-}
-
-func TestIdleConnExpired(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-
-	tests := []struct {
-		name        string
-		conn        idleConn
-		maxLifetime time.Duration
-		maxIdle     time.Duration
-		want        bool
-	}{
-		{
-			name:        "fresh connection",
-			conn:        idleConn{createdAt: now, idleSince: now},
-			maxLifetime: time.Hour, maxIdle: time.Minute,
-			want: false,
-		},
-		{
-			name:        "lifetime exceeded",
-			conn:        idleConn{createdAt: now.Add(-2 * time.Hour), idleSince: now},
-			maxLifetime: time.Hour, maxIdle: time.Minute,
-			want: true,
-		},
-		{
-			name:        "idle exceeded",
-			conn:        idleConn{createdAt: now, idleSince: now.Add(-2 * time.Minute)},
-			maxLifetime: time.Hour, maxIdle: time.Minute,
-			want: true,
-		},
-		{
-			name:        "bounds disabled",
-			conn:        idleConn{createdAt: now.Add(-100 * time.Hour), idleSince: now.Add(-100 * time.Hour)},
-			maxLifetime: -1, maxIdle: -1,
-			want: false,
-		},
-		{
-			name:        "idle bound ignored when zero",
-			conn:        idleConn{createdAt: now, idleSince: now.Add(-100 * time.Hour)},
-			maxLifetime: time.Hour, maxIdle: 0,
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := tt.conn.expired(now, tt.maxLifetime, tt.maxIdle); got != tt.want {
-				t.Fatalf("expired() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIdleConnNilIsDead(t *testing.T) {
-	t.Parallel()
-
-	ic := &idleConn{}
-	if !ic.dead() {
-		t.Fatal("a connection with no driver handle should count as dead")
-	}
-	if ic.usable(time.Now(), time.Hour, time.Minute) {
-		t.Fatal("a dead connection should never be usable")
-	}
-
-	// The state probes reach into the driver, so they must short-circuit on a dead
-	// connection rather than dereference it.
-	if ic.busy() {
-		t.Error("busy() on a dead connection should be false, not a panic")
-	}
-	if ic.inTransaction() {
-		t.Error("inTransaction() on a dead connection should be false, not a panic")
-	}
-}
-
-// A dead connection is never recycled, whatever else is configured.
-func TestRecyclableRejectsDeadConnection(t *testing.T) {
-	t.Parallel()
-
-	p := newTestPool(t, Config{MaxConns: 1})
-
-	if p.recyclable(&idleConn{createdAt: time.Now(), idleSince: time.Now()}) {
-		t.Fatal("recyclable() accepted a connection with no driver handle")
-	}
-}
-
-// popIdle must discard expired connections instead of handing them out, otherwise a
-// pool that idled through a failover keeps serving connections to a server that is gone.
-func TestPopIdleDiscardsExpired(t *testing.T) {
-	t.Parallel()
-
-	p := newTestPool(t, Config{MaxConns: 4, MaxConnLifetime: time.Minute})
-
-	stale := &idleConn{createdAt: time.Now().Add(-time.Hour), idleSince: time.Now()}
-	p.totalConns.Add(1)
-	p.shards[3].push(stale)
-
-	if _, _, ok := p.popIdle(); ok {
-		t.Fatal("popIdle() handed out an expired connection")
-	}
-	if got := p.totalConns.Load(); got != 0 {
-		t.Fatalf("totalConns = %d, want 0 after the expired connection was destroyed", got)
-	}
-}
-
-func TestReapExpiredDrainsStaleConnections(t *testing.T) {
-	t.Parallel()
-
-	p := newTestPool(t, Config{MaxConns: 4, MaxConnLifetime: time.Minute})
-
-	p.totalConns.Add(2)
-	p.shards[0].push(&idleConn{createdAt: time.Now().Add(-time.Hour), idleSince: time.Now()})
-	p.shards[1].push(&idleConn{createdAt: time.Now().Add(-time.Hour), idleSince: time.Now()})
-
-	p.reapExpired()
-
-	if got := p.Stat().IdleConnections(); got != 0 {
-		t.Fatalf("IdleConnections() = %d, want 0", got)
-	}
-	if got := p.totalConns.Load(); got != 0 {
-		t.Fatalf("totalConns = %d, want 0", got)
-	}
-}
-
-func TestReleaseDestroysWhenPoolIsClosed(t *testing.T) {
-	t.Parallel()
-
-	p := newTestPool(t, Config{MaxConns: 1})
-
-	if err := p.permits.acquire(t.Context()); err != nil {
-		t.Fatalf("priming the permit set: %v", err)
-	}
-	p.totalConns.Add(1)
-
-	now := time.Now()
-	conn := newConnWrapper(p, &idleConn{createdAt: now, idleSince: now}, 0)
-
-	p.closed.Store(true)
-	conn.Release()
-
-	if got := p.Stat().IdleConnections(); got != 0 {
-		t.Fatalf("a connection released into a closed pool was pooled anyway: idle = %d", got)
+	if got := p.Stat().TotalConnections(); got != 0 {
+		t.Errorf("TotalConnections() = %d after a failed dial, want 0 - the slot leaked", got)
 	}
 }

@@ -30,9 +30,9 @@ func (c *connWrapper) Listen(ctx context.Context, channel string) error {
 	// Marked before the statement runs: a LISTEN that fails mid-flight may still
 	// have registered, and cleaning up an unsubscribed connection is harmless
 	// where missing one is not.
-	c.idle.listening = true
+	c.conn().listening = true
 
-	if _, err := c.conn.Exec(ctx, "LISTEN "+quoteIdentifier(channel)); err != nil {
+	if _, err := c.pgx().Exec(ctx, "LISTEN "+quoteIdentifier(channel)); err != nil {
 		return fmt.Errorf("gpool/postgres: listen on %q: %w", channel, err)
 	}
 	return nil
@@ -49,13 +49,13 @@ func (c *connWrapper) Unlisten(ctx context.Context, channel string) error {
 		statement = "UNLISTEN " + quoteIdentifier(channel)
 	}
 
-	if _, err := c.conn.Exec(ctx, statement); err != nil {
+	if _, err := c.pgx().Exec(ctx, statement); err != nil {
 		return fmt.Errorf("gpool/postgres: unlisten %q: %w", channel, err)
 	}
 
 	// Only a blanket unlisten is known to have cleared everything.
 	if channel == "" {
-		c.idle.listening = false
+		c.conn().listening = false
 	}
 	return nil
 }
@@ -71,7 +71,7 @@ func (c *connWrapper) Notify(ctx context.Context, channel, payload string) error
 
 	// pg_notify is the function form of NOTIFY, which takes the channel and
 	// payload as bound parameters instead of as literals in the statement text.
-	if _, err := c.conn.Exec(ctx, "SELECT pg_notify($1, $2)", channel, payload); err != nil {
+	if _, err := c.pgx().Exec(ctx, "SELECT pg_notify($1, $2)", channel, payload); err != nil {
 		return fmt.Errorf("gpool/postgres: notify %q: %w", channel, err)
 	}
 	return nil
@@ -83,7 +83,7 @@ func (c *connWrapper) WaitForNotification(ctx context.Context) (gpool.Notificati
 		return gpool.Notification{}, err
 	}
 
-	notification, err := c.conn.WaitForNotification(ctx)
+	notification, err := c.pgx().WaitForNotification(ctx)
 	if err != nil {
 		return gpool.Notification{}, err
 	}

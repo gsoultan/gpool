@@ -4,27 +4,9 @@ package pool
 
 import (
 	"context"
-	"fmt"
-	"math/rand/v2"
-	"runtime"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
-)
-
-// shardCount is the number of lock-striped idle buckets. A power of two keeps the
-// modulo cheap, and 16 is deep enough to spread contention across realistic core
-// counts without leaving every shard empty on a small pool.
-const shardCount = 16
-
-const (
-	// connCloseTimeout bounds the graceful close of a single connection.
-	connCloseTimeout = 5 * time.Second
-	// closeDrainTimeout bounds how long Close waits for checked-out connections.
-	closeDrainTimeout = 30 * time.Second
+	"github.com/gsoultan/gpool/pkg/pooling"
 )
 
 // Postgres is a connection pool for PostgreSQL implementing gpool.Pool.
@@ -32,34 +14,12 @@ const (
 // The zero value is not usable; construct it with New. All methods are safe for
 // concurrent use, and Close is idempotent.
 //
-// Capacity is enforced by a permit set holding MaxConns tokens. A permit is held
-// for as long as a connection is checked out, so total connections can never
-// exceed MaxConns: a connection is only ever created while its acquirer holds a
-// permit, and is only ever returned to a shard when one is being released.
+// Capacity, lock-striped idle buckets, the reaper, lifecycle, and statistics come
+// from pkg/pooling, which every vendor shares. What lives here is what is actually
+// specific to PostgreSQL: how to dial pgx, how to tell a connection is dead, and
+// how to return one to a clean state.
 type Postgres struct {
-	config     Config
-	connConfig *pgx.ConnConfig
-	permits    permits
-	shards     [shardCount]shard
-
-	totalConns atomic.Int32
-
-	// Cumulative acquisition counters. Occupancy alone cannot distinguish a pool
-	// that is merely busy from one that is too small; these can.
-	acquireCount         atomic.Int64
-	acquireWaitNanos     atomic.Int64
-	emptyAcquireCount    atomic.Int64
-	canceledAcquireCount atomic.Int64
-
-	// clock is read on every acquire and release, so it is cached rather than
-	// asked of the system each time.
-	clock *coarseClock
-
-	closed    atomic.Bool
-	closeOnce sync.Once
-	bgCtx     context.Context
-	bgCancel  context.CancelFunc
-	bgDone    chan struct{}
+	core *pooling.Core[*pgConn]
 }
 
 // Compile-time proof that Postgres satisfies the public pool contract.
@@ -79,19 +39,11 @@ func New(config Config) (*Postgres, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	p := &Postgres{
-		config:     config,
-		connConfig: connConfig,
-		permits:    newPermits(config.MaxConns),
-		clock:      newCoarseClock(),
-		bgCtx:      ctx,
-		bgCancel:   cancel,
-		bgDone:     make(chan struct{}),
+	core, err := pooling.New[*pgConn](&pgxDriver{config: config, connConfig: connConfig}, config.pooling())
+	if err != nil {
+		return nil, err
 	}
-
-	go p.maintain()
-	return p, nil
+	return &Postgres{core: core}, nil
 }
 
 // Acquire checks out a connection, blocking until one is available, the context is
@@ -103,390 +55,21 @@ func (p *Postgres) Acquire(ctx context.Context) (gpool.Conn, error) {
 // acquire is the typed form of Acquire used internally, so the pool-level helpers
 // do not have to type-assert their own return value.
 func (p *Postgres) acquire(ctx context.Context) (*connWrapper, error) {
-	if p.closed.Load() {
-		return nil, ErrPoolClosed
-	}
-	if err := p.acquirePermit(ctx); err != nil {
-		return nil, err
-	}
-	// Close may have run while this caller was queued for a permit.
-	if p.closed.Load() {
-		p.permits.release()
-		return nil, ErrPoolClosed
-	}
-
-	ic, idx, err := p.take(ctx)
+	handle, err := p.core.Acquire(ctx)
 	if err != nil {
-		p.permits.release()
-		return nil, err
+		return nil, translate(err)
 	}
-	return newConnWrapper(p, ic, idx), nil
+	return newConnWrapper(handle), nil
 }
 
-// take returns a connection for a caller that already holds a permit, either by
-// reusing an idle one or by establishing a new one.
-//
-// Holding a permit is not on its own enough to bound the total number of
-// connections. A permit released by one caller establishes no ordering with
-// respect to a *different* caller's freshly pooled connection, so a probe can
-// legitimately miss an idle connection that already exists and dial a surplus
-// one. Reserving a slot in the total count is what makes MaxConns an actual
-// ceiling on connections to the server rather than only on concurrent checkouts.
-func (p *Postgres) take(ctx context.Context) (*idleConn, int, error) {
-	for {
-		if ic, idx, ok := p.popIdle(); ok {
-			return ic, idx, nil
-		}
-
-		if p.reserveSlot() {
-			ic, err := p.connect(ctx)
-			if err != nil {
-				p.releaseSlot()
-				return nil, 0, err
-			}
-			return ic, int(rand.UintN(shardCount)), nil
-		}
-
-		// At the ceiling with nothing visible to probe. Because this caller holds
-		// a permit, fewer than MaxConns others can hold one, so at least one of
-		// the existing connections is idle or on its way there — it just has not
-		// become visible yet. Yield and look again rather than exceed the ceiling.
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
-		}
-		runtime.Gosched()
-	}
-}
-
-// reserveSlot claims room for one more connection, reporting false at the ceiling.
-func (p *Postgres) reserveSlot() bool {
-	for {
-		current := p.totalConns.Load()
-		if current >= p.config.MaxConns {
-			return false
-		}
-		if p.totalConns.CompareAndSwap(current, current+1) {
-			return true
-		}
-	}
-}
-
-// releaseSlot gives back a reservation that was not turned into a connection.
-func (p *Postgres) releaseSlot() {
-	p.totalConns.Add(-1)
-}
-
-// acquirePermit takes a permit and records what it cost.
-//
-// Only the blocking path is timed. An acquisition served immediately has no wait
-// to measure, and reading the clock there would cost more than the metric is worth
-// on a path that is otherwise ~250ns.
-func (p *Postgres) acquirePermit(ctx context.Context) error {
-	if p.permits.tryAcquire() {
-		p.acquireCount.Add(1)
-		return nil
-	}
-
-	start := time.Now()
-	if err := p.permits.wait(ctx); err != nil {
-		p.canceledAcquireCount.Add(1)
-		return err
-	}
-
-	p.acquireWaitNanos.Add(int64(time.Since(start)))
-	p.emptyAcquireCount.Add(1)
-	p.acquireCount.Add(1)
-	return nil
-}
-
-// popIdle finds a usable idle connection, destroying any dead or expired ones it
-// passes. Probing starts at a random shard: a shared round-robin counter would put
-// every Acquire in the process on one contended cache line, which is exactly the
-// contention the striping exists to remove.
-func (p *Postgres) popIdle() (*idleConn, int, bool) {
-	start := rand.UintN(shardCount)
-	now := p.clock.now()
-
-	for i := range uint(shardCount) {
-		idx := int((start + i) % shardCount)
-		s := &p.shards[idx]
-		for {
-			ic := s.pop()
-			if ic == nil {
-				break
-			}
-			if ic.usable(now, p.config.MaxConnLifetime, p.config.MaxConnIdleTime) {
-				return ic, idx, true
-			}
-			p.destroy(ic)
-		}
-	}
-	return nil, 0, false
-}
-
-// release returns a connection to the pool, or destroys it if it is no longer fit
-// to reuse. The permit is released last so a waiter never wakes up before the
-// connection it is waiting for is visible.
-func (p *Postgres) release(ic *idleConn, shardIdx int) {
-	defer p.permits.release()
-
-	if p.closed.Load() || !p.recyclable(ic) {
-		p.destroy(ic)
-		return
-	}
-
-	ic.idleSince = p.clock.now()
-	p.shards[shardIdx].push(ic)
-}
-
-// recyclable reports whether a returned connection is fit to hand to the next
-// caller, cleaning it up where that is cheaper than replacing it.
-//
-// This is the boundary that makes pooling safe: whatever the previous caller left
-// behind must not be observable by the next one.
-func (p *Postgres) recyclable(ic *idleConn) bool {
-	if ic.dead() {
-		return false
-	}
-
-	// An unread result leaves the connection mid-protocol. Nothing can be sent on
-	// it, not even a cleanup statement, so it cannot be salvaged.
-	if ic.busy() {
-		return false
-	}
-
-	// A caller that returns a connection without settling its transaction must not
-	// leak it onward. Unwinding costs one round trip; replacing the connection
-	// costs a full reconnect, so unwinding is tried first.
-	if ic.inTransaction() && !p.rollback(ic) {
-		return false
-	}
-
-	// A LISTEN outlives the caller that registered it, so the subscription is
-	// cleared before the connection can serve anyone else. Only connections that
-	// actually listened pay for this.
-	if ic.listening && !p.unlisten(ic) {
-		return false
-	}
-
-	if p.config.ResetQuery != "" && !p.reset(ic) {
-		return false
-	}
-
-	// Idle expiry is deliberately not checked here: the connection was in use until
-	// this instant, so only its total lifetime can have run out.
-	return !ic.expired(p.clock.now(), p.config.MaxConnLifetime, 0)
-}
-
-// rollback unwinds a transaction left open by the previous caller, reporting
-// whether the connection came back to a clean idle state.
-func (p *Postgres) rollback(ic *idleConn) bool {
-	ctx, cancel := context.WithTimeout(p.bgCtx, p.config.ResetQueryTimeout)
-	defer cancel()
-
-	if _, err := ic.conn.Exec(ctx, "ROLLBACK"); err != nil {
-		return false
-	}
-	return !ic.inTransaction()
-}
-
-// unlisten clears every subscription on a connection, reporting whether it came
-// back clean enough to reuse.
-func (p *Postgres) unlisten(ic *idleConn) bool {
-	ctx, cancel := context.WithTimeout(p.bgCtx, p.config.ResetQueryTimeout)
-	defer cancel()
-
-	if _, err := ic.conn.Exec(ctx, unlistenAll); err != nil {
-		return false
-	}
-	ic.listening = false
-	return true
-}
-
-// reset runs ResetQuery, reporting whether the connection is clean enough to reuse.
-// A failed reset means the session state is unknown, so the caller destroys it
-// rather than leaking one caller's state into the next.
-func (p *Postgres) reset(ic *idleConn) bool {
-	ctx, cancel := context.WithTimeout(p.bgCtx, p.config.ResetQueryTimeout)
-	defer cancel()
-
-	_, err := ic.conn.Exec(ctx, p.config.ResetQuery)
-	return err == nil
-}
-
-// connect establishes one new connection from the pre-parsed template.
-func (p *Postgres) connect(ctx context.Context) (*idleConn, error) {
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline && p.config.ConnectTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, p.config.ConnectTimeout)
-		defer cancel()
-	}
-
-	connConfig := p.connConfig.Copy()
-	if p.config.BeforeConnect != nil {
-		if err := p.config.BeforeConnect(connConfig); err != nil {
-			return nil, fmt.Errorf("gpool/postgres: BeforeConnect: %w", err)
-		}
-	}
-
-	conn, err := pgx.ConnectConfig(ctx, connConfig)
-	if err != nil {
-		return nil, fmt.Errorf("gpool/postgres: connect: %w", err)
-	}
-
-	if p.config.AfterConnect != nil {
-		if err := p.config.AfterConnect(conn); err != nil {
-			closeConn(conn)
-			return nil, fmt.Errorf("gpool/postgres: AfterConnect: %w", err)
-		}
-	}
-
-	// The slot was reserved by take before dialling, so the count is already
-	// correct. Establishing a connection is not a hot path, so this one reading
-	// of the clock is exact rather than cached.
-	now := time.Now()
-	return &idleConn{conn: conn, createdAt: now, idleSince: now}, nil
-}
-
-// destroy closes a connection and drops it from the total count.
-func (p *Postgres) destroy(ic *idleConn) {
-	closeConn(ic.conn)
-	p.releaseSlot()
-}
-
-// closeConn closes a pgx connection with a bounded, cancellation-immune context so
-// shutdown still gets a chance to send a graceful Terminate.
-func closeConn(conn *pgx.Conn) {
-	if conn == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), connCloseTimeout)
-	defer cancel()
-	_ = conn.Close(ctx)
-}
-
-// maintain runs the background reaper: it retires expired connections and keeps
-// MinConns warm. It exits when the pool is closed.
-func (p *Postgres) maintain() {
-	defer close(p.bgDone)
-
-	p.warmUp()
-
-	// The clock ticks regardless of whether health checking is enabled: the
-	// acquire path reads it, so it must stay fresh even when nothing is reaped.
-	clock := time.NewTicker(clockResolution)
-	defer clock.Stop()
-
-	var health <-chan time.Time
-	if p.config.HealthCheckPeriod > 0 {
-		ticker := time.NewTicker(p.config.HealthCheckPeriod)
-		defer ticker.Stop()
-		health = ticker.C
-	}
-
-	for {
-		select {
-		case <-p.bgCtx.Done():
-			return
-		case <-clock.C:
-			p.clock.update()
-		case <-health:
-			p.reapExpired()
-			p.warmUp()
-		}
-	}
-}
-
-// reapExpired closes idle connections that have outlived their bounds. Without it
-// a pool that goes quiet after a failover keeps handing out connections to a server
-// that no longer exists.
-func (p *Postgres) reapExpired() {
-	now := p.clock.now()
-	stale := func(ic *idleConn) bool {
-		return ic.dead() || ic.expired(now, p.config.MaxConnLifetime, p.config.MaxConnIdleTime)
-	}
-
-	for i := range p.shards {
-		for _, ic := range p.shards[i].takeIf(stale) {
-			p.destroy(ic)
-		}
-	}
-}
-
-// warmUp tops the pool up to MinConns. Each connection is created while holding a
-// permit so the MaxConns invariant still holds, and a dial failure ends the round
-// rather than spinning against an unreachable server.
-func (p *Postgres) warmUp() {
-	for p.config.MinConns > 0 && p.totalConns.Load() < p.config.MinConns {
-		if p.closed.Load() {
-			return
-		}
-		if err := p.permits.acquire(p.bgCtx); err != nil {
-			return
-		}
-		if !p.reserveSlot() {
-			p.permits.release()
-			return
-		}
-
-		ic, err := p.connect(p.bgCtx)
-		if err != nil {
-			p.releaseSlot()
-			p.permits.release()
-			return
-		}
-
-		p.shards[rand.UintN(shardCount)].push(ic)
-		p.permits.release()
-	}
-}
-
-// Close shuts the pool down. It stops the reaper, waits briefly for checked-out
-// connections to come back, and closes everything idle. It is idempotent, and it
-// never blocks indefinitely: a connection that is still out when the drain window
-// expires is closed by whoever eventually releases it.
+// Close shuts the pool down. It is idempotent, and it never blocks indefinitely.
 func (p *Postgres) Close() {
-	p.closeOnce.Do(func() {
-		p.closed.Store(true)
-		p.bgCancel()
-		<-p.bgDone
-
-		ctx, cancel := context.WithTimeout(context.Background(), closeDrainTimeout)
-		p.permits.drain(ctx, p.config.MaxConns)
-		cancel()
-
-		for i := range p.shards {
-			for _, ic := range p.shards[i].drain() {
-				p.destroy(ic)
-			}
-		}
-	})
+	p.core.Close()
 }
 
-// Stat reports current pool occupancy. It is lock-free.
+// Stat reports current occupancy and cumulative acquisition counters. It is lock-free.
 func (p *Postgres) Stat() gpool.Stat {
-	total := p.totalConns.Load()
-
-	var idle int32
-	for i := range p.shards {
-		idle += p.shards[i].count.Load()
-	}
-
-	// total and the shard counters are sampled independently, so clamp rather than
-	// report a nonsensical pair to a metrics backend.
-	idle = min(idle, total)
-
-	return poolStat{
-		total:     total,
-		idle:      idle,
-		active:    max(total-idle, 0),
-		maxConns:  p.config.MaxConns,
-		acquires:  p.acquireCount.Load(),
-		waitNanos: p.acquireWaitNanos.Load(),
-		empties:   p.emptyAcquireCount.Load(),
-		canceled:  p.canceledAcquireCount.Load(),
-	}
+	return p.core.Stat()
 }
 
 // Exec acquires a connection, runs the statement, and releases the connection.
@@ -508,7 +91,7 @@ func (p *Postgres) Query(ctx context.Context, sql string, args ...any) (gpool.Ro
 		return nil, err
 	}
 
-	rows, err := conn.conn.Query(ctx, sql, args...)
+	rows, err := conn.conn().conn.Query(ctx, sql, args...)
 	if err != nil {
 		conn.Release()
 		return nil, err
@@ -525,11 +108,20 @@ func (p *Postgres) QueryRow(ctx context.Context, sql string, args ...any) gpool.
 		return errorRow{err: err}
 	}
 
-	rows, err := conn.conn.Query(ctx, sql, args...)
+	rows, err := conn.conn().conn.Query(ctx, sql, args...)
 	if err != nil {
 		closeRows(rows)
 		conn.Release()
 		return errorRow{err: err}
 	}
 	return newRow(rows, conn)
+}
+
+// translate maps the engine's sentinel errors onto this package's, so callers
+// match on one vocabulary rather than reaching through to the engine.
+func translate(err error) error {
+	if err == pooling.ErrClosed {
+		return ErrPoolClosed
+	}
+	return err
 }

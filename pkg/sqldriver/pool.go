@@ -153,6 +153,19 @@ func (a *adapter) Dead(c *conn) bool {
 	return c == nil || c.driver == nil || c.dead()
 }
 
+// NeedsCleanup reports whether Recyclable has work to do, without any I/O.
+//
+// A driver implementing SessionResetter always does, because database/sql's own
+// contract is that ResetSession runs before every reuse. Without one, only an
+// abandoned transaction needs unwinding.
+func (a *adapter) NeedsCleanup(c *conn) bool {
+	if c.tx != nil {
+		return true
+	}
+	_, resets := c.driver.(driver.SessionResetter)
+	return resets
+}
+
 // Recyclable returns the connection to a clean state for the next caller.
 func (a *adapter) Recyclable(ctx context.Context, c *conn) bool {
 	return c.reset(ctx)

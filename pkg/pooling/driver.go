@@ -33,8 +33,21 @@ type Driver[C any] interface {
 	// the driver already has.
 	Dead(conn C) bool
 
+	// NeedsCleanup reports whether Recyclable has any work to do. Like Dead it
+	// must not perform I/O.
+	//
+	// This exists to keep the common release free of cost. Bounding Recyclable
+	// means building a context with a deadline, and that is four allocations and
+	// a runtime timer — measured at over half a microsecond on a path that is
+	// otherwise around two hundred nanoseconds. A connection returned with nothing
+	// left on it should pay none of that, so the engine only builds the context
+	// when the driver says there is something to clean.
+
+	NeedsCleanup(conn C) bool
+
 	// Recyclable reports whether a connection is fit to hand to the next caller,
-	// cleaning up whatever the previous one left behind.
+	// cleaning up whatever the previous one left behind. It is called only when
+	// NeedsCleanup reported true, and its context carries CleanupTimeout.
 	//
 	// This is the boundary that makes pooling safe. Whatever the previous caller
 	// left — an open transaction, a subscription, session settings — must not be
