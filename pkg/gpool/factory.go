@@ -82,9 +82,16 @@ func NewPool(vendor Vendor, config any) (Pool, error) {
 func NewSubscriber(vendor Vendor, config any) (cdc.Subscriber, error) {
 	registry.mu.RLock()
 	factory, ok := registry.subscribers[vendor]
+	_, pooled := registry.pools[vendor]
 	registry.mu.RUnlock()
 
 	if !ok {
+		// A vendor whose pool is registered was imported successfully, so telling
+		// the caller to import it would send them after a package that does not
+		// exist. The two cases need different answers.
+		if pooled {
+			return nil, fmt.Errorf("%w: vendor %q", ErrNoCDCSupport, vendor)
+		}
 		return nil, fmt.Errorf("%w: no subscriber factory for vendor %q (did you import the vendor package?)", ErrVendorNotRegistered, vendor)
 	}
 	return factory(config)

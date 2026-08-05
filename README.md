@@ -1,7 +1,7 @@
 # Gpool: A Go Connection Pooling & CDC Library
 
 Gpool is a Go 1.26-native **library** for connection pooling — PostgreSQL, MySQL, MariaDB,
-SQL Server and ClickHouse — with Change Data Capture for PostgreSQL. It is designed to be embedded in your application or composed into another library — there
+SQL Server and ClickHouse — with Change Data Capture for PostgreSQL and MySQL. It is designed to be embedded in your application or composed into another library — there
 is no daemon, no CLI, no config file, no logger, and no process-global state.
 
 ## 📦 Installation
@@ -33,10 +33,16 @@ behaviour:
 | Database | Module | Driver | CDC |
 | :--- | :--- | :--- | :--- |
 | PostgreSQL | `github.com/gsoultan/gpool` | `pgx/v5` | ✅ logical replication |
-| MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | — |
-| MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | — |
+| MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
+| MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
 | SQL Server | `github.com/gsoultan/gpool/vendors/mssql` | `microsoft/go-mssqldb` | — |
 | ClickHouse | `github.com/gsoultan/gpool/vendors/clickhouse` | `clickhouse-go/v2` | — |
+
+MySQL CDC is a module of its own again, nested inside the pool vendor at
+`github.com/gsoultan/gpool/vendors/mysql/cdc`: reading a binary log pulls in the
+TiDB parser and thirty-odd other modules, and someone who only wants a
+connection pool should not download them. The pool vendor resolves 11 modules,
+the CDC one 47.
 
 Each non-PostgreSQL vendor is **its own Go module**. That is deliberate: a consumer
 using only PostgreSQL never downloads the MySQL driver, and `govulncheck` never flags a
@@ -216,6 +222,53 @@ keeps prepared statements. `BeforeConnect` can override the execution mode if yo
 preserves them.
 
 ## ⚡ CDC Streaming
+
+### Positions and resuming
+
+Every event carries a `Position` — an opaque, vendor-defined marker. Record it,
+hand it back to `SubscribeFrom`, and the stream resumes:
+
+```go
+for event := range stream.All() {
+    process(event)
+    checkpoint = event.Position   // persist this
+}
+...
+stream, err := subscriber.SubscribeFrom(ctx, checkpoint)
+```
+
+Resuming starts **at or before** the change the position came from, never after
+it. A resumed stream may repeat what it already delivered but never skips, which
+is what carries at-least-once delivery across a restart — so a consumer that must
+not process a change twice needs its own idempotency.
+
+The difference between vendors is not cosmetic and loses data if assumed away:
+
+| | PostgreSQL | MySQL |
+| :--- | :--- | :--- |
+| who records your position | the server, in the slot | nobody |
+| `Subscribe()` with no position | resumes from the slot, losing nothing | starts at the **end of the log**, skipping everything since |
+| resuming needs client state | no | **yes** — only `SubscribeFrom` |
+| falling behind costs | the primary's disk fills | the logs expire and **changes are lost** |
+
+PostgreSQL additionally refuses `SubscribeFrom` with a position behind the slot's
+confirmed position (`ErrPositionBehindSlot`), because the server would silently
+clamp to the slot and serve a stream with a hole in it.
+
+### Slot administration is optional
+
+`cdc.Subscriber` is `Stream` + `TableManager` + `Close`. Replication slots and
+publications are PostgreSQL's model — MySQL has no equivalent at all — so they
+live in a separate interface reached by type assertion, the same way `BulkCopier`
+and `Notifier` do:
+
+```go
+if slots, ok := subscriber.(cdc.ReplicationManager); ok {
+    err := slots.CreateSlot(ctx, "orders")
+}
+```
+
+A failed assertion means "this engine has no such objects", not an error.
 
 ```go
 import (

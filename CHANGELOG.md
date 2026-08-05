@@ -20,6 +20,22 @@ the abstraction holds.
 
 ### Added
 
+- **MySQL and MariaDB change data capture**, over the binary log, in
+  `vendors/mysql/cdc`. GTID positions where the source has GTIDs enabled and
+  binlog file offsets where it does not; column names from the log itself under
+  `binlog_row_metadata=FULL` and from `information_schema` otherwise, with a
+  count mismatch reported rather than guessed at.
+
+  A module of its own, nested inside the pool vendor, because the binlog reader
+  pulls in the TiDB parser and thirty-odd other modules — the pool vendor stays
+  at 11 while the CDC one resolves 47.
+
+- **`Stream.SubscribeFrom`**, which resumes from a position the consumer
+  recorded. This is what makes CDC possible at all against a source that keeps no
+  per-consumer state: PostgreSQL remembers where a subscriber got to, MySQL
+  remembers nothing, and without a caller-supplied position `Subscribe` on MySQL
+  can only ever mean "from now on".
+
 - **`examples/gpoolproxy`, a PostgreSQL pooler built on the engine.** An in-process
   pool cannot bound connections across applications — forty services holding
   twenty-five each still open a thousand, and none of them can see the others.
@@ -86,6 +102,35 @@ the abstraction holds.
   Present in v0.1.0.
 
 ### Changed
+
+- **`Event.LSN uint64` is now `Event.Position`**, an opaque vendor-defined marker.
+  A WAL offset is the only change log position that fits in a number: MySQL's is
+  a set of UUID ranges or a file and offset, MongoDB's is a token, SQL Server's is
+  sixteen bytes. PostgreSQL renders its LSN in the same `0/1A2B3C4D` notation
+  psql uses, so a recorded position can still be compared against the server by
+  hand.
+
+  The contract is also now stated: resuming from a position starts at or before
+  the change it came from, never after it. A resumed stream may repeat but does
+  not skip. This was always true — the PostgreSQL integration test shows the last
+  event replaying — it just was not written down.
+
+- **`cdc.ReplicationManager` is no longer part of `cdc.Subscriber`.** Slots and
+  publications are PostgreSQL's model, and a vendor without them would have had to
+  implement four methods that only return errors, turning a compile-time mismatch
+  into a runtime one. It is an optional capability now, reached by type assertion
+  like `BulkCopier` and `Notifier`. PostgreSQL still implements it, with a
+  compile-time proof so the capability cannot be dropped silently.
+
+- **`SubscribeFrom` on PostgreSQL refuses a position behind the slot's confirmed
+  position**, with `ErrPositionBehindSlot`. The server accepts such a request and
+  silently begins at `confirmed_flush_lsn` instead, so a consumer resuming from
+  older bookkeeping would receive a stream missing everything in between, with
+  nothing to distinguish it from a complete one.
+
+- **`NewSubscriber` distinguishes a vendor with no CDC from one that was never
+  imported**, with `ErrNoCDCSupport`. Advising an import that cannot help sends
+  the caller after a bug that is not there.
 
 - **PostgreSQL now runs on the shared pooling engine.** It had its own copy of
   capacity, sharding, the reaper, the clock and the statistics — around 1,270

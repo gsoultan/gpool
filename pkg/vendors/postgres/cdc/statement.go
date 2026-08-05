@@ -16,6 +16,11 @@ const verifyTableSQL = `SELECT 1 FROM pg_publication_tables
 WHERE pubname = $1 AND tablename = $3 AND ($2 = '' OR schemaname = $2)
 LIMIT 1`
 
+// slotConfirmedSQL reads the position a slot has already confirmed. The value is
+// NULL for a slot that has never streamed, which is not an error: it means the
+// slot confirms nothing yet and any start position is fair game.
+const slotConfirmedSQL = `SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1`
+
 func createPublicationSQL(name string, tables []string) string {
 	return fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s",
 		quoteIdentifier(name), quoteQualifiedNames(tables))

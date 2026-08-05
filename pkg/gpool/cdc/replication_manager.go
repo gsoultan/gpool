@@ -8,6 +8,16 @@ import (
 
 // ReplicationManager administers the server-side objects a subscription depends on.
 //
+// This is an optional capability, not part of Subscriber: slots and publications
+// are PostgreSQL's model, and an engine that streams its log without any
+// per-consumer server object — MySQL's binlog — has nothing to administer. Reach
+// it by type assertion, and treat a failed assertion as "this vendor has no such
+// objects" rather than as an error:
+//
+//	if slots, ok := subscriber.(cdc.ReplicationManager); ok {
+//		err := slots.CreateSlot(ctx, "orders")
+//	}
+//
 // These are destructive, privileged operations. Dropping a replication slot discards
 // the WAL position it was holding, so a subscriber that later reconnects to that slot
 // name resumes from wherever the new slot is created, not from where the old one left off.

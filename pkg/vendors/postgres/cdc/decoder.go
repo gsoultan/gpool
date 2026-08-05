@@ -17,11 +17,11 @@ const (
 // decodeInsert converts an insert record into an event.
 func decodeInsert(rel *pglogrepl.RelationMessage, m *pglogrepl.InsertMessage, lsn uint64) cdc.Event {
 	return cdc.Event{
-		Op:     cdc.OpInsert,
-		Schema: rel.Namespace,
-		Table:  rel.RelationName,
-		LSN:    lsn,
-		After:  decodeTuple(rel, m.Tuple),
+		Op:       cdc.OpInsert,
+		Schema:   rel.Namespace,
+		Table:    rel.RelationName,
+		Position: position(lsn),
+		After:    decodeTuple(rel, m.Tuple),
 	}
 }
 
@@ -30,23 +30,23 @@ func decodeInsert(rel *pglogrepl.RelationMessage, m *pglogrepl.InsertMessage, ls
 // identity unless the primary key changed.
 func decodeUpdate(rel *pglogrepl.RelationMessage, m *pglogrepl.UpdateMessage, lsn uint64) cdc.Event {
 	return cdc.Event{
-		Op:     cdc.OpUpdate,
-		Schema: rel.Namespace,
-		Table:  rel.RelationName,
-		LSN:    lsn,
-		Before: decodeTuple(rel, m.OldTuple),
-		After:  decodeTuple(rel, m.NewTuple),
+		Op:       cdc.OpUpdate,
+		Schema:   rel.Namespace,
+		Table:    rel.RelationName,
+		Position: position(lsn),
+		Before:   decodeTuple(rel, m.OldTuple),
+		After:    decodeTuple(rel, m.NewTuple),
 	}
 }
 
 // decodeDelete converts a delete record into an event.
 func decodeDelete(rel *pglogrepl.RelationMessage, m *pglogrepl.DeleteMessage, lsn uint64) cdc.Event {
 	return cdc.Event{
-		Op:     cdc.OpDelete,
-		Schema: rel.Namespace,
-		Table:  rel.RelationName,
-		LSN:    lsn,
-		Before: decodeTuple(rel, m.OldTuple),
+		Op:       cdc.OpDelete,
+		Schema:   rel.Namespace,
+		Table:    rel.RelationName,
+		Position: position(lsn),
+		Before:   decodeTuple(rel, m.OldTuple),
 	}
 }
 

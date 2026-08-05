@@ -34,7 +34,12 @@ type fakeSubscriber struct {
 	closeErr error
 }
 
-var _ cdc.Subscriber = (*fakeSubscriber)(nil)
+var (
+	_ cdc.Subscriber = (*fakeSubscriber)(nil)
+	// ReplicationManager is optional now, so a vendor that has it must still be
+	// reachable by assertion. This proves the assertion path stays compilable.
+	_ cdc.ReplicationManager = (*fakeSubscriber)(nil)
+)
 
 func (s *fakeSubscriber) Close() error {
 	s.closes.Add(1)
@@ -42,6 +47,10 @@ func (s *fakeSubscriber) Close() error {
 }
 
 func (s *fakeSubscriber) Subscribe(context.Context) (cdc.EventStream, error) { return nil, nil }
+
+func (s *fakeSubscriber) SubscribeFrom(context.Context, cdc.Position) (cdc.EventStream, error) {
+	return nil, nil
+}
 
 func (s *fakeSubscriber) AddTables(context.Context, ...string) error    { return nil }
 func (s *fakeSubscriber) RemoveTables(context.Context, ...string) error { return nil }

@@ -1,6 +1,50 @@
 # CDC internals
 
-`pkg/vendors/postgres/cdc`. pgoutput plugin, proto_version 1.
+Two vendors now: `pkg/vendors/postgres/cdc` (pgoutput, proto_version 1) and
+`vendors/mysql/cdc` (binary log). See `mem:cdc_mysql` for the second one and for
+what having two proved about the shared interfaces.
+
+## The shared surface, and what is deliberately not in it
+
+`cdc.Subscriber` is `Stream` + `TableManager` + `Close`. **`ReplicationManager`
+is optional**, reached by type assertion like `BulkCopier`/`Batcher`/`Notifier`.
+Slots and publications are PostgreSQL's model; MySQL has no server-side
+subscription object at all, so a mandatory interface would have forced four
+methods that only return errors — a compile-time mismatch turned into a runtime
+one. PostgreSQL carries `var _ cdc.ReplicationManager = (*Postgres)(nil)`
+explicitly, because with it off `Subscriber` nothing else would catch dropping it.
+
+**`Event.Position` is an opaque `cdc.Position` string, not a number.** A WAL
+offset is the only change log position that fits in a uint64; MySQL's is a set of
+UUID ranges or a file and offset, MongoDB's a token, SQL Server's sixteen bytes.
+PostgreSQL formats its own as `0/1A2B3C4D` — the same text psql shows — and keeps
+the numeric LSN internally for confirm arithmetic (`pendingEvent` carries both,
+so the reader never parses back text it just formatted).
+
+**The resume contract:** resuming starts *at or before* the change a position came
+from, never after. A resumed stream may repeat, never skips. Proven both ways —
+PostgreSQL replays the last event, MySQL replays the whole transaction — so a
+consumer needing exactly-once needs its own idempotency.
+
+**`Stream.SubscribeFrom(ctx, Position)`** exists because PostgreSQL remembers
+where a subscriber got to and MySQL remembers nothing. Without it, MySQL CDC
+could only mean "from now on".
+
+**`ErrNoCDCSupport`** distinguishes a vendor with a pool but no CDC from one never
+imported. The old message told a MySQL caller to import a package that would
+never have helped.
+
+## PostgreSQL: SubscribeFrom cannot rewind behind the slot
+
+The server accepts a start LSN below `confirmed_flush_lsn` and silently begins at
+the confirmed position instead — a stream with a hole in it, indistinguishable
+from a complete one, and the WAL behind that point may already be recycled.
+`checkResumable` reads `pg_replication_slots.confirmed_flush_lsn` and returns
+`ErrPositionBehindSlot` rather than letting that happen. One extra round trip,
+only on the SubscribeFrom path.
+
+Found by an integration test asserting the wrong thing: resuming from event 2 of
+4 delivered only `r4`, because the first stream had already confirmed past it.
 
 ## Two connection kinds, never shared
 
