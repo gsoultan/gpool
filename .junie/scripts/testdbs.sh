@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Gembit Soultan Shirazi <gembit.soultan@gmail.com>. All rights reserved.
+#
+# Bring up every database gpool's integration tests need, using Apple's
+# `container` runtime.
+#
+# gpool's unit tests need nothing. Its integration tests need a real server, and
+# several classes of bug in this repository were invisible without one: a
+# released-but-unscanned row leaving a connection busy, DISCARD ALL invalidating
+# pgx's statement cache, ClickHouse returning uint8 where the driver's documented
+# type set says it cannot. This script is what makes running them cheap enough
+# that they actually get run.
+#
+#   ./.junie/scripts/testdbs.sh up            # start everything
+#   ./.junie/scripts/testdbs.sh up mysql      # or just one
+#   eval "$(./.junie/scripts/testdbs.sh env)" # export the DSNs
+#   ./.junie/scripts/testdbs.sh status
+#   ./.junie/scripts/testdbs.sh down
+#
+# Each engine is configured for what the tests actually exercise, which is more
+# than a default image gives you: PostgreSQL needs wal_level=logical before it
+# will hand out a replication slot, and MySQL and MariaDB need row-format binary
+# logging before there is anything for CDC to read.
+
+set -euo pipefail
+
+readonly PREFIX="gpool"
+readonly PG_PASSWORD="postgres"
+readonly MY_PASSWORD="root"
+readonly CH_PASSWORD="clickhouse"
+# SQL Server refuses to start on a password it considers weak, and says so only
+# in the log, several seconds after appearing to launch cleanly.
+readonly MSSQL_PASSWORD='Str0ng!Passw0rd'
+
+readonly ALL_ENGINES=(postgres mysql mariadb clickhouse mssql)
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+note() { printf '  %s\n' "$*"; }
+
+command -v container >/dev/null 2>&1 || die "Apple's 'container' is not installed: brew install container"
+
+# --- per-engine settings ------------------------------------------------------
+# Ports are offset well clear of a local install's defaults, so a running
+# PostgreSQL on 5432 is never what a test accidentally connects to.
+
+image_of() {
+  case "$1" in
+    postgres)   echo "docker.io/library/postgres:17-alpine" ;;
+    mysql)      echo "docker.io/library/mysql:8.4" ;;
+    mariadb)    echo "docker.io/library/mariadb:11" ;;
+    clickhouse) echo "docker.io/clickhouse/clickhouse-server:24-alpine" ;;
+    mssql)      echo "mcr.microsoft.com/mssql/server:2022-latest" ;;
+  esac
+}
+
+port_of() {
+  case "$1" in
+    postgres)   echo 55432 ;;
+    mysql)      echo 53306 ;;
+    mariadb)    echo 53307 ;;
+    clickhouse) echo 59000 ;;
+    mssql)      echo 51433 ;;
+  esac
+}
+
+# dsn_of prints the environment variable name and value the tests read.
+dsn_of() {
+  local port; port="$(port_of "$1")"
+  case "$1" in
+    postgres)   echo "DATABASE_URL=postgres://postgres:${PG_PASSWORD}@127.0.0.1:${port}/postgres?sslmode=disable" ;;
+    mysql)      echo "MYSQL_DSN=root:${MY_PASSWORD}@tcp(127.0.0.1:${port})/gpool?parseTime=true" ;;
+    mariadb)    echo "MARIADB_DSN=root:${MY_PASSWORD}@tcp(127.0.0.1:${port})/gpool?parseTime=true" ;;
+    clickhouse) echo "CLICKHOUSE_DSN=clickhouse://default:${CH_PASSWORD}@127.0.0.1:${port}/gpool" ;;
+    mssql)      echo "MSSQL_DSN=sqlserver://sa:${MSSQL_PASSWORD}@127.0.0.1:${port}?database=master" ;;
+  esac
+}
+
+start_engine() {
+  local engine="$1" name="${PREFIX}-$1" port image
+  port="$(port_of "$engine")"
+  image="$(image_of "$engine")"
+
+  if container ls 2>/dev/null | grep -q "^${name} "; then
+    note "${engine}: already running"
+    return 0
+  fi
+  container rm "${name}" >/dev/null 2>&1 || true
+
+  case "$engine" in
+    postgres)
+      # wal_level=logical is what makes a replication slot possible at all; the
+      # CDC tests skip themselves without it rather than fail confusingly.
+      container run -d --rm --name "${name}" -p "${port}:5432" \
+        -e POSTGRES_PASSWORD="${PG_PASSWORD}" \
+        "${image}" \
+        -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 \
+        -c max_connections=400 >/dev/null
+      ;;
+    mysql)
+      # ROW format carries the before-image CDC needs; GTIDs make a recorded
+      # position survive a failover, which a file offset does not.
+      container run -d --rm --name "${name}" -p "${port}:3306" \
+        -e MYSQL_ROOT_PASSWORD="${MY_PASSWORD}" -e MYSQL_DATABASE=gpool \
+        "${image}" \
+        --log-bin=mysql-bin --binlog-format=ROW --server-id=1 \
+        --gtid-mode=ON --enforce-gtid-consistency=ON >/dev/null
+      ;;
+    mariadb)
+      # MariaDB's GTIDs are always on and are written differently from MySQL's,
+      # which is exactly why the CDC vendor has a separate flavour.
+      container run -d --rm --name "${name}" -p "${port}:3306" \
+        -e MARIADB_ROOT_PASSWORD="${MY_PASSWORD}" -e MARIADB_DATABASE=gpool \
+        "${image}" \
+        --log-bin=mariadb-bin --binlog-format=ROW --server-id=1 >/dev/null
+      ;;
+    clickhouse)
+      container run -d --rm --name "${name}" -p "${port}:9000" \
+        -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" -e CLICKHOUSE_DB=gpool \
+        -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+        "${image}" >/dev/null
+      ;;
+    mssql)
+      # Microsoft publishes SQL Server for amd64 only. On Apple silicon this
+      # needs emulation, and whether that works is a property of the host rather
+      # than of gpool — so a failure here is reported plainly instead of being
+      # retried into a confusing timeout.
+      container run -d --rm --name "${name}" -p "${port}:1433" \
+        --arch amd64 -m 4G -c 4 \
+        -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD="${MSSQL_PASSWORD}" -e MSSQL_PID=Developer \
+        "${image}" >/dev/null 2>&1 || {
+          note "mssql: could not start (amd64 image on $(uname -m) host)"
+          return 1
+        }
+      ;;
+  esac
+  note "${engine}: starting on 127.0.0.1:${port}"
+}
+
+# ready_engine asks the engine itself, using the client already inside its image,
+# so the host needs no psql/mysql/sqlcmd installed.
+ready_engine() {
+  local engine="$1" name="${PREFIX}-$1"
+  case "$engine" in
+    postgres)   container exec "${name}" pg_isready -q ;;
+    mysql)      container exec "${name}" mysqladmin ping -uroot -p"${MY_PASSWORD}" --silent ;;
+    mariadb)    container exec "${name}" mariadb-admin ping -uroot -p"${MY_PASSWORD}" --silent ;;
+    clickhouse) container exec "${name}" clickhouse-client --password "${CH_PASSWORD}" --query "SELECT 1" ;;
+    mssql)      container exec "${name}" /opt/mssql-tools18/bin/sqlcmd -C \
+                  -S localhost -U sa -P "${MSSQL_PASSWORD}" -Q "SELECT 1" ;;
+  esac >/dev/null 2>&1
+}
+
+wait_ready() {
+  local engine="$1" tries="${2:-90}"
+  for _ in $(seq 1 "${tries}"); do
+    if ready_engine "${engine}"; then
+      note "${engine}: ready"
+      return 0
+    fi
+    if ! container ls 2>/dev/null | grep -q "^${PREFIX}-${engine} "; then
+      note "${engine}: container exited — check: container logs ${PREFIX}-${engine}"
+      return 1
+    fi
+    sleep 2
+  done
+  note "${engine}: not ready after $((tries * 2))s"
+  return 1
+}
+
+cmd_up() {
+  local engines=("$@")
+  [ ${#engines[@]} -eq 0 ] && engines=("${ALL_ENGINES[@]}")
+
+  # Started together, waited on afterwards: pulling five images serially is the
+  # slow part, and none of them depend on another.
+  local started=()
+  for engine in "${engines[@]}"; do
+    start_engine "${engine}" && started+=("${engine}") || true
+  done
+
+  local failed=0
+  for engine in "${started[@]}"; do
+    wait_ready "${engine}" || failed=1
+  done
+
+  echo
+  echo "Export the connection strings with:"
+  echo "  eval \"\$(${BASH_SOURCE[0]} env)\""
+  return "${failed}"
+}
+
+cmd_down() {
+  local engines=("$@")
+  [ ${#engines[@]} -eq 0 ] && engines=("${ALL_ENGINES[@]}")
+  for engine in "${engines[@]}"; do
+    container stop "${PREFIX}-${engine}" >/dev/null 2>&1 && note "${engine}: stopped" || true
+    container rm "${PREFIX}-${engine}" >/dev/null 2>&1 || true
+  done
+}
+
+# cmd_env prints only what is actually reachable, so a partial bring-up does not
+# hand the test suite a DSN pointing at nothing.
+cmd_env() {
+  for engine in "${ALL_ENGINES[@]}"; do
+    if ready_engine "${engine}"; then
+      echo "export ${1:-}$(dsn_of "${engine}")"
+    fi
+  done
+}
+
+cmd_status() {
+  printf '%-12s %-9s %-8s %s\n' ENGINE STATE READY ADDRESS
+  for engine in "${ALL_ENGINES[@]}"; do
+    local state=stopped ready=no
+    if container ls 2>/dev/null | grep -q "^${PREFIX}-${engine} "; then
+      state=running
+      ready_engine "${engine}" && ready=yes
+    fi
+    printf '%-12s %-9s %-8s 127.0.0.1:%s\n' "${engine}" "${state}" "${ready}" "$(port_of "${engine}")"
+  done
+}
+
+case "${1:-}" in
+  up)     shift; cmd_up "$@" ;;
+  down)   shift; cmd_down "$@" ;;
+  env)    shift; cmd_env "$@" ;;
+  status) cmd_status ;;
+  *)      die "usage: $(basename "$0") up|down|env|status [engine...]
+engines: ${ALL_ENGINES[*]}" ;;
+esac

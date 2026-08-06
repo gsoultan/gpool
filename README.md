@@ -45,6 +45,28 @@ TiDB parser and thirty-odd other modules, and someone who only wants a
 connection pool should not download them. The pool vendor resolves 11 modules,
 the CDC one 47.
 
+### What has actually been tested
+
+Every row below was run against a real server, not asserted. `.junie/scripts/testdbs.sh`
+brings all five up with Apple's `container`; the suites skip themselves when a DSN
+is unset, so an untested vendor reports as skipped rather than as passing.
+
+| Database | Pool | CDC | Verified against |
+| :--- | :--- | :--- | :--- |
+| PostgreSQL | ✅ | ✅ | 17.10, `wal_level=logical` |
+| MySQL | ✅ | ✅ | 8.4.11, `binlog_format=ROW`, GTID on, `binlog_row_metadata=MINIMAL` |
+| MariaDB | ✅ | ✅ | 11.8.8, `binlog_format=ROW` |
+| SQL Server | ✅ | — | 2022 (16.0.4265.3) |
+| ClickHouse | ✅ | — | 24.10.2.80 |
+
+SQL Server and ClickHouse have **no CDC implementation**; the dash means absent, not
+untested. `gpool.NewSubscriber` reports that with `ErrNoCDCSupport` rather than
+suggesting an import that would not help.
+
+MySQL's CDC is exercised under `binlog_row_metadata=MINIMAL` deliberately — the
+default, and the harder path, because column names then have to come from
+`information_schema` rather than from the log.
+
 Each non-PostgreSQL vendor is **its own Go module**. That is deliberate: a consumer
 using only PostgreSQL never downloads the MySQL driver, and `govulncheck` never flags a
 CVE in a driver you do not import. The cost is a `go get` per vendor.

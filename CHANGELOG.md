@@ -16,6 +16,30 @@ reason and the migration.
 gone a release cycle without a breaking change, and a second vendor exists to prove
 the abstraction holds.
 
+## [Unreleased]
+
+### Fixed
+
+- **MariaDB was a registered vendor that had never been run.** Both the pool and
+  the CDC suites read `MYSQL_DSN` and used the MySQL flavour, so every MariaDB
+  path — its GTID syntax, `gtid_binlog_pos` rather than `gtid_executed`, its own
+  binlog event type — was unexecuted while the vendor was documented as supported.
+  Both suites now fan out across `MYSQL_DSN` and `MARIADB_DSN` as named subtests,
+  so a MariaDB-only failure is reported rather than hidden behind a passing MySQL
+  run.
+
+- **SQL Server had never been run either**, because its image is amd64-only and
+  the previous container runtime segfaulted emulating it. It now passes under
+  Apple's `container`, which does run it.
+
+### Added
+
+- **`.junie/scripts/testdbs.sh`** brings up PostgreSQL, MySQL, MariaDB, ClickHouse
+  and SQL Server with the settings the tests actually need — `wal_level=logical`,
+  row-format binary logging — and prints the DSNs. Integration tests that are
+  awkward to run are integration tests that do not get run, which is how two
+  vendors stayed unverified.
+
 ## [0.3.0] - 2026-08-06
 
 > **Upgrading from v0.2.0.** Two breaking changes, both in `pkg/gpool/cdc`, and

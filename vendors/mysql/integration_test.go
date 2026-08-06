@@ -17,23 +17,61 @@ import (
 	"github.com/gsoultan/gpool/vendors/mysql"
 )
 
-// dsn returns the configured DSN, skipping when none is set.
-//
-//	MYSQL_DSN='root:root@tcp(127.0.0.1:53306)/gpool?parseTime=true' go test ./...
-func dsn(t *testing.T) string {
-	t.Helper()
-
-	value := os.Getenv("MYSQL_DSN")
-	if value == "" {
-		t.Skip("MYSQL_DSN not set")
-	}
-	return value
+// target is one server the suite runs against.
+type target struct {
+	name   string
+	vendor gpool.Vendor
+	dsn    string
 }
 
-func newPool(t *testing.T, config mysql.Config) gpool.Pool {
+// targets returns every server configured in the environment.
+//
+//	MYSQL_DSN='root:root@tcp(127.0.0.1:53306)/gpool?parseTime=true' \
+//	MARIADB_DSN='root:root@tcp(127.0.0.1:53307)/gpool?parseTime=true' go test ./...
+//
+// One implementation serves both names because MariaDB speaks the MySQL wire
+// protocol — but "speaks the same protocol" is not "behaves the same way", and
+// the two have been diverging since 2009 over collations, auth plugins and
+// reserved words. Running the suite against one of them proves nothing about the
+// other, so both are exercised whenever both are configured.
+func targets(t *testing.T) []target {
 	t.Helper()
 
-	config.DSN = dsn(t)
+	candidates := []struct {
+		name   string
+		env    string
+		vendor gpool.Vendor
+	}{
+		{"mysql", "MYSQL_DSN", mysql.MySQL},
+		{"mariadb", "MARIADB_DSN", mysql.MariaDB},
+	}
+
+	var configured []target
+	for _, candidate := range candidates {
+		if value := os.Getenv(candidate.env); value != "" {
+			configured = append(configured, target{candidate.name, candidate.vendor, value})
+		}
+	}
+	if len(configured) == 0 {
+		t.Skip("neither MYSQL_DSN nor MARIADB_DSN is set")
+	}
+	return configured
+}
+
+// eachTarget runs body against every configured server, as its own subtest so a
+// MariaDB-only failure is named rather than hidden behind a passing MySQL run.
+func eachTarget(t *testing.T, body func(*testing.T, target)) {
+	t.Helper()
+
+	for _, server := range targets(t) {
+		t.Run(server.name, func(t *testing.T) { body(t, server) })
+	}
+}
+
+func newPool(t *testing.T, server target, config mysql.Config) gpool.Pool {
+	t.Helper()
+
+	config.DSN = server.dsn
 
 	pool, err := mysql.New(config)
 	if err != nil {
@@ -60,317 +98,334 @@ func scratchTable(t *testing.T, pool gpool.Pool, definition string) string {
 	return name
 }
 
-// Both names resolve to the same implementation, because MariaDB speaks the
-// MySQL wire protocol.
+// Each name must resolve through the registry and reach its own server.
 func TestVendorSelfRegisters(t *testing.T) {
-	for _, vendor := range []gpool.Vendor{mysql.MySQL, mysql.MariaDB} {
-		t.Run(string(vendor), func(t *testing.T) {
-			pool, err := gpool.NewPool(vendor, mysql.Config{DSN: dsn(t), MaxConns: 2})
-			if err != nil {
-				t.Fatalf("NewPool(%s) = %v", vendor, err)
-			}
-			defer pool.Close()
+	eachTarget(t, func(t *testing.T, server target) {
+		pool, err := gpool.NewPool(server.vendor, mysql.Config{DSN: server.dsn, MaxConns: 2})
+		if err != nil {
+			t.Fatalf("NewPool(%s) = %v", server.vendor, err)
+		}
+		defer pool.Close()
 
-			var value int
-			if err := pool.QueryRow(t.Context(), "SELECT 1").Scan(&value); err != nil {
-				t.Fatalf("QueryRow() = %v", err)
-			}
-			if value != 1 {
-				t.Fatalf("got %d, want 1", value)
-			}
-		})
-	}
+		var value int
+		if err := pool.QueryRow(t.Context(), "SELECT 1").Scan(&value); err != nil {
+			t.Fatalf("QueryRow() = %v", err)
+		}
+		if value != 1 {
+			t.Fatalf("got %d, want 1", value)
+		}
+	})
 }
 
 func TestQueryRoundTrip(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 4})
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 4})
 
-	var (
-		number int64
-		text   string
-		flag   bool
-	)
-	err := pool.QueryRow(t.Context(), "SELECT ?, ?, ?", 42, "hello", true).Scan(&number, &text, &flag)
-	if err != nil {
-		t.Fatalf("Scan() = %v", err)
-	}
-	if number != 42 || text != "hello" || !flag {
-		t.Fatalf("got (%d, %q, %v)", number, text, flag)
-	}
+		var (
+			number int64
+			text   string
+			flag   bool
+		)
+		err := pool.QueryRow(t.Context(), "SELECT ?, ?, ?", 42, "hello", true).Scan(&number, &text, &flag)
+		if err != nil {
+			t.Fatalf("Scan() = %v", err)
+		}
+		if number != 42 || text != "hello" || !flag {
+			t.Fatalf("got (%d, %q, %v)", number, text, flag)
+		}
+	})
 }
 
 func TestIteratorReleasesTheConnection(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 1})
-	table := scratchTable(t, pool, "(id INT PRIMARY KEY, label VARCHAR(32))")
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 1})
+		table := scratchTable(t, pool, "(id INT PRIMARY KEY, label VARCHAR(32))")
 
-	for i := range 3 {
-		if _, err := pool.Exec(t.Context(),
-			fmt.Sprintf("INSERT INTO %s (id, label) VALUES (?, ?)", table), i, fmt.Sprintf("row-%d", i)); err != nil {
-			t.Fatalf("INSERT = %v", err)
-		}
-	}
-
-	// One permit, so a leaked connection would hang the second pass.
-	for range 2 {
-		rows, err := pool.Query(t.Context(), fmt.Sprintf("SELECT id, label FROM %s ORDER BY id", table))
-		if err != nil {
-			t.Fatalf("Query() = %v", err)
-		}
-
-		seen := 0
-		for row := range rows.All() {
-			var id int
-			var label string
-			if err := row.Scan(&id, &label); err != nil {
-				t.Fatalf("Scan() = %v", err)
+		for i := range 3 {
+			if _, err := pool.Exec(t.Context(),
+				fmt.Sprintf("INSERT INTO %s (id, label) VALUES (?, ?)", table), i, fmt.Sprintf("row-%d", i)); err != nil {
+				t.Fatalf("INSERT = %v", err)
 			}
-			if label != fmt.Sprintf("row-%d", id) {
-				t.Errorf("row %d has label %q", id, label)
+		}
+
+		// One permit, so a leaked connection would hang the second pass.
+		for range 2 {
+			rows, err := pool.Query(t.Context(), fmt.Sprintf("SELECT id, label FROM %s ORDER BY id", table))
+			if err != nil {
+				t.Fatalf("Query() = %v", err)
 			}
-			seen++
+
+			seen := 0
+			for row := range rows.All() {
+				var id int
+				var label string
+				if err := row.Scan(&id, &label); err != nil {
+					t.Fatalf("Scan() = %v", err)
+				}
+				if label != fmt.Sprintf("row-%d", id) {
+					t.Errorf("row %d has label %q", id, label)
+				}
+				seen++
+			}
+			if seen != 3 {
+				t.Fatalf("iterated %d rows, want 3", seen)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("Err() = %v", err)
+			}
 		}
-		if seen != 3 {
-			t.Fatalf("iterated %d rows, want 3", seen)
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatalf("Err() = %v", err)
-		}
-	}
+	})
 }
 
 func TestQueryRowReportsNoRows(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 2})
-	table := scratchTable(t, pool, "(id INT PRIMARY KEY)")
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 2})
+		table := scratchTable(t, pool, "(id INT PRIMARY KEY)")
 
-	var id int
-	err := pool.QueryRow(t.Context(), fmt.Sprintf("SELECT id FROM %s WHERE id = 999", table)).Scan(&id)
-	if !errors.Is(err, sqldriver.ErrNoRows) {
-		t.Fatalf("Scan() on an empty result = %v, want ErrNoRows", err)
-	}
+		var id int
+		err := pool.QueryRow(t.Context(), fmt.Sprintf("SELECT id FROM %s WHERE id = 999", table)).Scan(&id)
+		if !errors.Is(err, sqldriver.ErrNoRows) {
+			t.Fatalf("Scan() on an empty result = %v, want ErrNoRows", err)
+		}
+	})
 }
 
 // MySQL reports LAST_INSERT_ID, which PostgreSQL has no equivalent for.
 func TestExecReportsLastInsertID(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 2})
-	table := scratchTable(t, pool, "(id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(32))")
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 2})
+		table := scratchTable(t, pool, "(id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(32))")
 
-	result, err := pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s (label) VALUES (?)", table), "first")
-	if err != nil {
-		t.Fatalf("Exec() = %v", err)
-	}
-	if got := result.RowsAffected(); got != 1 {
-		t.Errorf("RowsAffected() = %d, want 1", got)
-	}
+		result, err := pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s (label) VALUES (?)", table), "first")
+		if err != nil {
+			t.Fatalf("Exec() = %v", err)
+		}
+		if got := result.RowsAffected(); got != 1 {
+			t.Errorf("RowsAffected() = %d, want 1", got)
+		}
 
-	withID, ok := result.(interface{ LastInsertID() (int64, bool) })
-	if !ok {
-		t.Fatal("the result should expose LastInsertID")
-	}
-	if id, present := withID.LastInsertID(); !present || id != 1 {
-		t.Errorf("LastInsertID() = (%d, %v), want (1, true)", id, present)
-	}
+		withID, ok := result.(interface{ LastInsertID() (int64, bool) })
+		if !ok {
+			t.Fatal("the result should expose LastInsertID")
+		}
+		if id, present := withID.LastInsertID(); !present || id != 1 {
+			t.Errorf("LastInsertID() = (%d, %v), want (1, true)", id, present)
+		}
+	})
 }
 
 // The canonical transaction idiom, against a real driver.
 func TestTransactionCommitWithDeferredRollback(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 2})
-	table := scratchTable(t, pool, "(id INT PRIMARY KEY) ENGINE=InnoDB")
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 2})
+		table := scratchTable(t, pool, "(id INT PRIMARY KEY) ENGINE=InnoDB")
 
-	conn, err := pool.Acquire(t.Context())
-	if err != nil {
-		t.Fatalf("Acquire() = %v", err)
-	}
-	defer conn.Release()
+		conn, err := pool.Acquire(t.Context())
+		if err != nil {
+			t.Fatalf("Acquire() = %v", err)
+		}
+		defer conn.Release()
 
-	tx, err := conn.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("Begin() = %v", err)
-	}
-	defer func() { _ = tx.Rollback(t.Context()) }()
+		tx, err := conn.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("Begin() = %v", err)
+		}
+		defer func() { _ = tx.Rollback(t.Context()) }()
 
-	if _, err := tx.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s (id) VALUES (1)", table)); err != nil {
-		t.Fatalf("Exec() = %v", err)
-	}
-	if err := tx.Commit(t.Context()); err != nil {
-		t.Fatalf("Commit() = %v", err)
-	}
+		if _, err := tx.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s (id) VALUES (1)", table)); err != nil {
+			t.Fatalf("Exec() = %v", err)
+		}
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatalf("Commit() = %v", err)
+		}
 
-	var count int
-	if err := pool.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count); err != nil {
-		t.Fatalf("count = %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("committed row count = %d, want 1", count)
-	}
+		var count int
+		if err := pool.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count); err != nil {
+			t.Fatalf("count = %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("committed row count = %d, want 1", count)
+		}
+	})
 }
 
 // A transaction the caller abandoned must not leak onward: the next caller would
 // inherit its locks and its snapshot.
 func TestAbandonedTransactionIsUnwound(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 1})
-	table := scratchTable(t, pool, "(id INT PRIMARY KEY) ENGINE=InnoDB")
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 1})
+		table := scratchTable(t, pool, "(id INT PRIMARY KEY) ENGINE=InnoDB")
 
-	conn, err := pool.Acquire(t.Context())
-	if err != nil {
-		t.Fatalf("Acquire() = %v", err)
-	}
+		conn, err := pool.Acquire(t.Context())
+		if err != nil {
+			t.Fatalf("Acquire() = %v", err)
+		}
 
-	tx, err := conn.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("Begin() = %v", err)
-	}
-	if _, err := tx.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s (id) VALUES (1)", table)); err != nil {
-		t.Fatalf("Exec() = %v", err)
-	}
-	// Released without commit or rollback.
-	conn.Release()
+		tx, err := conn.Begin(t.Context())
+		if err != nil {
+			t.Fatalf("Begin() = %v", err)
+		}
+		if _, err := tx.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s (id) VALUES (1)", table)); err != nil {
+			t.Fatalf("Exec() = %v", err)
+		}
+		// Released without commit or rollback.
+		conn.Release()
 
-	// MaxConns is 1, so the next caller gets that same connection back. The
-	// uncommitted row must have been rolled away with it.
-	var count int
-	if err := pool.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count); err != nil {
-		t.Fatalf("the next caller inherited the abandoned transaction: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("row count = %d; the abandoned transaction was not rolled back", count)
-	}
+		// MaxConns is 1, so the next caller gets that same connection back. The
+		// uncommitted row must have been rolled away with it.
+		var count int
+		if err := pool.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s", table)).Scan(&count); err != nil {
+			t.Fatalf("the next caller inherited the abandoned transaction: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("row count = %d; the abandoned transaction was not rolled back", count)
+		}
 
-	// Unwinding must not have cost a reconnect.
-	if got := pool.Stat().TotalConnections(); got != 1 {
-		t.Errorf("TotalConnections() = %d, want 1", got)
-	}
+		// Unwinding must not have cost a reconnect.
+		if got := pool.Stat().TotalConnections(); got != 1 {
+			t.Errorf("TotalConnections() = %d, want 1", got)
+		}
+	})
 }
 
 func TestPoolUnderConcurrentLoad(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 8, MinConns: 2})
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 8, MinConns: 2})
 
-	var wg sync.WaitGroup
-	errs := make(chan error, 128)
+		var wg sync.WaitGroup
+		errs := make(chan error, 128)
 
-	for range 128 {
-		wg.Go(func() {
-			var value int
-			if err := pool.QueryRow(context.Background(), "SELECT 1").Scan(&value); err != nil {
-				errs <- err
-			}
-		})
-	}
-	wg.Wait()
-	close(errs)
+		for range 128 {
+			wg.Go(func() {
+				var value int
+				if err := pool.QueryRow(context.Background(), "SELECT 1").Scan(&value); err != nil {
+					errs <- err
+				}
+			})
+		}
+		wg.Wait()
+		close(errs)
 
-	for err := range errs {
-		t.Fatalf("concurrent query = %v", err)
-	}
+		for err := range errs {
+			t.Fatalf("concurrent query = %v", err)
+		}
 
-	stat := pool.Stat()
-	if stat.TotalConnections() > 8 {
-		t.Errorf("TotalConnections() = %d, want at most MaxConns (8)", stat.TotalConnections())
-	}
-	if stat.ActiveConnections() != 0 {
-		t.Errorf("ActiveConnections() = %d, want 0 once every caller has finished", stat.ActiveConnections())
-	}
-	if stat.AcquireCount() < 128 {
-		t.Errorf("AcquireCount() = %d, want at least 128", stat.AcquireCount())
-	}
+		stat := pool.Stat()
+		if stat.TotalConnections() > 8 {
+			t.Errorf("TotalConnections() = %d, want at most MaxConns (8)", stat.TotalConnections())
+		}
+		if stat.ActiveConnections() != 0 {
+			t.Errorf("ActiveConnections() = %d, want 0 once every caller has finished", stat.ActiveConnections())
+		}
+		if stat.AcquireCount() < 128 {
+			t.Errorf("AcquireCount() = %d, want at least 128", stat.AcquireCount())
+		}
+	})
 }
 
 // The ceiling must hold against a real server, which is the number that matters:
 // exceeding it means more backends than the operator authorised.
 func TestNeverExceedsMaxConns(t *testing.T) {
-	const capacity = 4
-	pool := newPool(t, mysql.Config{MaxConns: capacity})
+	eachTarget(t, func(t *testing.T, server target) {
+		const capacity = 4
+		pool := newPool(t, server, mysql.Config{MaxConns: capacity})
 
-	var peak atomic.Int32
-	var wg sync.WaitGroup
+		var peak atomic.Int32
+		var wg sync.WaitGroup
 
-	for range 64 {
-		wg.Go(func() {
-			for range 25 {
-				conn, err := pool.Acquire(context.Background())
-				if err != nil {
-					return
-				}
-				for {
-					current := pool.Stat().TotalConnections()
-					high := peak.Load()
-					if current <= high || peak.CompareAndSwap(high, current) {
-						break
+		for range 64 {
+			wg.Go(func() {
+				for range 25 {
+					conn, err := pool.Acquire(context.Background())
+					if err != nil {
+						return
 					}
+					for {
+						current := pool.Stat().TotalConnections()
+						high := peak.Load()
+						if current <= high || peak.CompareAndSwap(high, current) {
+							break
+						}
+					}
+					conn.Release()
 				}
-				conn.Release()
-			}
-		})
-	}
-	wg.Wait()
+			})
+		}
+		wg.Wait()
 
-	if got := peak.Load(); got > capacity {
-		t.Fatalf("peak TotalConnections() = %d, want at most MaxConns (%d)", got, capacity)
-	}
+		if got := peak.Load(); got > capacity {
+			t.Fatalf("peak TotalConnections() = %d, want at most MaxConns (%d)", got, capacity)
+		}
+	})
 }
 
 func TestTypesRoundTrip(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 2})
-	table := scratchTable(t, pool, `(
-		id INT PRIMARY KEY,
-		name VARCHAR(64),
-		amount DECIMAL(10,2),
-		ratio DOUBLE,
-		flag BOOLEAN,
-		payload BLOB,
-		created DATETIME
-	)`)
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 2})
+		table := scratchTable(t, pool, `(
+			id INT PRIMARY KEY,
+			name VARCHAR(64),
+			amount DECIMAL(10,2),
+			ratio DOUBLE,
+			flag BOOLEAN,
+			payload BLOB,
+			created DATETIME
+		)`)
 
-	created := time.Date(2026, 8, 5, 12, 30, 0, 0, time.UTC)
-	_, err := pool.Exec(t.Context(),
-		fmt.Sprintf("INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?)", table),
-		1, "widget", "19.99", 0.25, true, []byte{0x01, 0x02}, created)
-	if err != nil {
-		t.Fatalf("INSERT = %v", err)
-	}
+		created := time.Date(2026, 8, 5, 12, 30, 0, 0, time.UTC)
+		_, err := pool.Exec(t.Context(),
+			fmt.Sprintf("INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?)", table),
+			1, "widget", "19.99", 0.25, true, []byte{0x01, 0x02}, created)
+		if err != nil {
+			t.Fatalf("INSERT = %v", err)
+		}
 
-	var (
-		id      int
-		name    string
-		amount  string
-		ratio   float64
-		flag    bool
-		payload []byte
-		when    time.Time
-	)
-	err = pool.QueryRow(t.Context(), fmt.Sprintf("SELECT * FROM %s WHERE id = ?", table), 1).
-		Scan(&id, &name, &amount, &ratio, &flag, &payload, &when)
-	if err != nil {
-		t.Fatalf("Scan() = %v", err)
-	}
+		var (
+			id      int
+			name    string
+			amount  string
+			ratio   float64
+			flag    bool
+			payload []byte
+			when    time.Time
+		)
+		err = pool.QueryRow(t.Context(), fmt.Sprintf("SELECT * FROM %s WHERE id = ?", table), 1).
+			Scan(&id, &name, &amount, &ratio, &flag, &payload, &when)
+		if err != nil {
+			t.Fatalf("Scan() = %v", err)
+		}
 
-	if id != 1 || name != "widget" || amount != "19.99" || ratio != 0.25 || !flag {
-		t.Errorf("got (%d, %q, %q, %v, %v)", id, name, amount, ratio, flag)
-	}
-	if len(payload) != 2 || payload[0] != 1 || payload[1] != 2 {
-		t.Errorf("payload = %v", payload)
-	}
-	// DATETIME needs parseTime=true in the DSN to arrive as a time.Time.
-	if !when.Equal(created) {
-		t.Errorf("created = %v, want %v", when, created)
-	}
+		if id != 1 || name != "widget" || amount != "19.99" || ratio != 0.25 || !flag {
+			t.Errorf("got (%d, %q, %q, %v, %v)", id, name, amount, ratio, flag)
+		}
+		if len(payload) != 2 || payload[0] != 1 || payload[1] != 2 {
+			t.Errorf("payload = %v", payload)
+		}
+		// DATETIME needs parseTime=true in the DSN to arrive as a time.Time.
+		if !when.Equal(created) {
+			t.Errorf("created = %v, want %v", when, created)
+		}
+	})
 }
 
 func TestNullHandling(t *testing.T) {
-	pool := newPool(t, mysql.Config{MaxConns: 2})
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 2})
 
-	var nullable any
-	if err := pool.QueryRow(t.Context(), "SELECT NULL").Scan(&nullable); err != nil {
-		t.Fatalf("Scan(NULL into any) = %v", err)
-	}
-	if nullable != nil {
-		t.Errorf("got %v, want nil", nullable)
-	}
+		var nullable any
+		if err := pool.QueryRow(t.Context(), "SELECT NULL").Scan(&nullable); err != nil {
+			t.Fatalf("Scan(NULL into any) = %v", err)
+		}
+		if nullable != nil {
+			t.Errorf("got %v, want nil", nullable)
+		}
 
-	// A NULL into a value type has no sensible answer and must say so.
-	var text string
-	if err := pool.QueryRow(t.Context(), "SELECT NULL").Scan(&text); !errors.Is(err, sqldriver.ErrScan) {
-		t.Errorf("Scan(NULL into *string) = %v, want ErrScan", err)
-	}
+		// A NULL into a value type has no sensible answer and must say so.
+		var text string
+		if err := pool.QueryRow(t.Context(), "SELECT NULL").Scan(&text); !errors.Is(err, sqldriver.ErrScan) {
+			t.Errorf("Scan(NULL into *string) = %v, want ErrScan", err)
+		}
+	})
 }
 
 func TestNewRejectsBadDSN(t *testing.T) {
