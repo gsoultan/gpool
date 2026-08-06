@@ -16,7 +16,14 @@ reason and the migration.
 gone a release cycle without a breaking change, and a second vendor exists to prove
 the abstraction holds.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-06
+
+> **Upgrading from v0.2.0.** Two breaking changes, both in `pkg/gpool/cdc`, and
+> both mechanical: `Event.LSN uint64` became `Event.Position` (a `cdc.Position`
+> string), and `cdc.ReplicationManager` left `cdc.Subscriber` — reach it with a
+> type assertion. Nothing in `pkg/gpool`, `pkg/pooling` or `pkg/sqldriver`
+> changed, so a consumer that does not use CDC can upgrade without edits.
+
 
 ### Added
 
@@ -259,5 +266,6 @@ test whose comment records the original failure mode.
 - PostgreSQL is the only vendor. The abstraction has not yet been proven against a
   second one.
 
-[Unreleased]: https://github.com/gsoultan/gpool/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/gsoultan/gpool/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/gsoultan/gpool/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/gsoultan/gpool/releases/tag/v0.1.0
