@@ -35,6 +35,15 @@ type Config struct {
 	// Defaults to max(4, GOMAXPROCS). Acquire blocks once the limit is reached.
 	MaxConns int32
 
+	// MaxConnsLimit is the hard ceiling SetMaxConns may raise MaxConns to.
+	// Defaults to MaxConns, which means capacity is fixed unless a limit is set
+	// deliberately — a pool that can silently grow is a pool that can exhaust the
+	// database, and that is the operator's decision rather than a default.
+	//
+	// Reserving headroom is free: the permit set is a struct{} channel, whose
+	// element has no backing array at any capacity.
+	MaxConnsLimit int32
+
 	// MinConns is the number of idle connections kept warm in the background.
 	// Defaults to 0 (purely lazy). Must not exceed MaxConns.
 	MinConns int32
@@ -72,6 +81,9 @@ func (c Config) WithDefaults() Config {
 	if c.MaxConns == 0 {
 		c.MaxConns = int32(max(minDefaultMaxConns, runtime.GOMAXPROCS(0)))
 	}
+	if c.MaxConnsLimit == 0 || c.MaxConnsLimit < c.MaxConns {
+		c.MaxConnsLimit = c.MaxConns
+	}
 	if c.MaxConnIdleTime == 0 {
 		c.MaxConnIdleTime = DefaultMaxConnIdleTime
 	}
@@ -100,6 +112,12 @@ func (c Config) Validate() error {
 	}
 	if c.MaxConns > 0 && c.MinConns > c.MaxConns {
 		return fmt.Errorf("%w: MinConns (%d) must not exceed MaxConns (%d)", ErrInvalidConfig, c.MinConns, c.MaxConns)
+	}
+	if c.MaxConnsLimit < 0 {
+		return fmt.Errorf("%w: MaxConnsLimit must not be negative, got %d", ErrInvalidConfig, c.MaxConnsLimit)
+	}
+	if c.MaxConnsLimit > 0 && c.MaxConns > 0 && c.MaxConnsLimit < c.MaxConns {
+		return fmt.Errorf("%w: MaxConnsLimit (%d) must not be below MaxConns (%d)", ErrInvalidConfig, c.MaxConnsLimit, c.MaxConns)
 	}
 	return nil
 }

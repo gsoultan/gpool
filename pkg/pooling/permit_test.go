@@ -14,7 +14,7 @@ import (
 func TestPermitsBoundConcurrency(t *testing.T) {
 	t.Parallel()
 
-	p := newPermits(2)
+	p := newPermits(2, 2)
 
 	if got := p.available(); got != 2 {
 		t.Fatalf("available() = %d, want 2", got)
@@ -43,7 +43,7 @@ func TestPermitsBoundConcurrency(t *testing.T) {
 func TestPermitsAcquireHonoursCancellation(t *testing.T) {
 	t.Parallel()
 
-	p := newPermits(1)
+	p := newPermits(1, 1)
 	if err := p.acquire(t.Context()); err != nil {
 		t.Fatalf("acquire() = %v", err)
 	}
@@ -64,7 +64,7 @@ func TestPermitsAcquireHonoursCancellation(t *testing.T) {
 func TestPermitsSurvivesOverRelease(t *testing.T) {
 	t.Parallel()
 
-	p := newPermits(1)
+	p := newPermits(1, 1)
 	p.release()
 	p.release()
 	p.release()
@@ -86,7 +86,7 @@ func TestPermitsSurvivesOverRelease(t *testing.T) {
 func TestPermitsDrain(t *testing.T) {
 	t.Parallel()
 
-	p := newPermits(4)
+	p := newPermits(4, 4)
 	if err := p.acquire(t.Context()); err != nil {
 		t.Fatalf("acquire() = %v", err)
 	}
@@ -108,7 +108,7 @@ func TestPermitsHoldTheBoundUnderContention(t *testing.T) {
 	const capacity = 8
 	const workers = 200
 
-	p := newPermits(capacity)
+	p := newPermits(capacity, capacity)
 
 	var held, peak atomic.Int32
 	var wg sync.WaitGroup
@@ -148,7 +148,7 @@ func TestPermitsHoldTheBoundUnderContention(t *testing.T) {
 // The uncontended path is what most acquisitions take, and it must not allocate.
 // Not parallel: AllocsPerRun needs the process to itself to get a stable count.
 func TestPermitsFastPathDoesNotAllocate(t *testing.T) {
-	p := newPermits(1)
+	p := newPermits(1, 1)
 	ctx := context.Background()
 
 	allocs := testing.AllocsPerRun(1000, func() {

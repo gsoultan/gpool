@@ -42,14 +42,30 @@ var ErrClosed = errors.New("gpool/pooling: pool is closed")
 type Core[C any] struct {
 	driver  Driver[C]
 	config  Config
-	permits permits
+	permits *permits
 	shards  [shardCount]shard[C]
+
+	// maxConns is the live ceiling. It starts at Config.MaxConns and moves with
+	// SetMaxConns, so it is read rather than the immutable config value anywhere
+	// capacity is enforced or reported.
+	maxConns atomic.Int32
 
 	// clock is read on every acquire and release, so it is cached rather than
 	// asked of the system each time.
 	clock *coarseClock
 
 	totalConns atomic.Int32
+
+	// checkedOut is the exact number of connections held by callers. Deriving it
+	// as total-idle instead samples two counters independently, which reads high
+	// while the background warm-up is mid-flight — and a caller ranking backends
+	// by load multiplies by this number.
+	checkedOut atomic.Int32
+
+	// waiting is how many callers are parked for a permit right now. The
+	// cumulative counters cannot answer "is the pool short *at this moment*",
+	// which is the question a dashboard and an autoscaler both ask.
+	waiting atomic.Int32
 
 	// Cumulative acquisition counters. Occupancy alone cannot distinguish a pool
 	// that is merely busy from one that is too small; these can.
@@ -81,20 +97,103 @@ func New[C any](driver Driver[C], config Config) (*Core[C], error) {
 	c := &Core[C]{
 		driver:   driver,
 		config:   config,
-		permits:  newPermits(config.MaxConns),
+		permits:  newPermits(config.MaxConns, config.MaxConnsLimit),
 		clock:    newCoarseClock(),
 		bgCtx:    ctx,
 		bgCancel: cancel,
 		bgDone:   make(chan struct{}),
 	}
 
+	c.maxConns.Store(config.MaxConns)
+
 	go c.maintain()
 	return c, nil
 }
 
 // Config returns the effective configuration, with defaults applied.
+//
+// Config.MaxConns is the value the pool started with. Use MaxConns for the
+// ceiling in force now, which SetMaxConns may have moved.
 func (c *Core[C]) Config() Config {
 	return c.config
+}
+
+// MaxConns returns the ceiling currently in force.
+func (c *Core[C]) MaxConns() int32 {
+	return c.maxConns.Load()
+}
+
+// SetMaxConns changes how many connections the pool may hand out, within
+// [MinConns, MaxConnsLimit]. It never blocks.
+//
+// Raising the ceiling takes effect immediately. Lowering it cannot reclaim a
+// permit a caller is holding — waiting for one would make this block on user
+// code — so the shortfall is remembered and paid by the next releases. Callers
+// already holding a connection keep it; the pool simply stops replacing them
+// until it is back under the new ceiling.
+//
+// Idle connections above the new ceiling are closed here rather than left to the
+// reaper, because MaxConnIdleTime is typically minutes and the reason to lower a
+// ceiling is usually to stop loading the database now.
+func (c *Core[C]) SetMaxConns(n int32) error {
+	if c.closed.Load() {
+		return ErrClosed
+	}
+	if n < c.config.MinConns {
+		return fmt.Errorf("%w: MaxConns (%d) must not be below MinConns (%d)",
+			ErrInvalidConfig, n, c.config.MinConns)
+	}
+	if n > c.config.MaxConnsLimit {
+		return fmt.Errorf("%w: MaxConns (%d) exceeds MaxConnsLimit (%d); raise the limit at construction",
+			ErrInvalidConfig, n, c.config.MaxConnsLimit)
+	}
+
+	// Order matters: publish the ceiling before moving the permits, so a caller
+	// that wins a freshly handed-out permit cannot then pass a stale check in
+	// reserveSlot and dial above the new ceiling.
+	c.maxConns.Store(n)
+	c.permits.resize(n)
+
+	c.trimIdle(n)
+	return nil
+}
+
+// trimIdle closes idle connections while the pool owns more than n in total.
+func (c *Core[C]) trimIdle(n int32) {
+	for c.totalConns.Load() > n {
+		ic, _, ok := c.popIdle()
+		if !ok {
+			// Whatever remains is checked out. It is judged again on release,
+			// which re-reads the ceiling, so no surplus survives indefinitely.
+			return
+		}
+		c.destroy(ic)
+	}
+}
+
+// EvictIdle closes every idle connection and reports how many it closed.
+// Checked-out connections are untouched and are judged when they are released.
+//
+// This exists because "the connections I hold are no longer the right ones" is a
+// state the caller can know about and the pool cannot: a backend that changed
+// role, a rotated credential, a failover that kept the address. Closing the whole
+// pool and rebuilding it throws away connections that are still fine, and
+// emulating this by acquiring each idle connection in turn races with callers
+// doing real work.
+func (c *Core[C]) EvictIdle() int {
+	if c.closed.Load() {
+		return 0
+	}
+
+	evicted := 0
+	everything := func(*idleConn[C]) bool { return true }
+	for i := range c.shards {
+		for _, ic := range c.shards[i].takeIf(everything) {
+			c.destroy(ic)
+			evicted++
+		}
+	}
+	return evicted
 }
 
 // Acquire checks out a connection, blocking until one is available, the context
@@ -117,6 +216,7 @@ func (c *Core[C]) Acquire(ctx context.Context) (Handle[C], error) {
 		c.permits.release()
 		return Handle[C]{}, err
 	}
+	c.checkedOut.Add(1)
 	return Handle[C]{core: c, idle: ic, conn: ic.conn, shardIdx: idx}, nil
 }
 
@@ -159,7 +259,7 @@ func (c *Core[C]) take(ctx context.Context) (*idleConn[C], int, error) {
 func (c *Core[C]) reserveSlot() bool {
 	for {
 		current := c.totalConns.Load()
-		if current >= c.config.MaxConns {
+		if current >= c.maxConns.Load() {
 			return false
 		}
 		if c.totalConns.CompareAndSwap(current, current+1) {
@@ -185,7 +285,10 @@ func (c *Core[C]) acquirePermit(ctx context.Context) error {
 	}
 
 	start := time.Now()
-	if err := c.permits.wait(ctx); err != nil {
+	c.waiting.Add(1)
+	err := c.permits.wait(ctx)
+	c.waiting.Add(-1)
+	if err != nil {
 		c.canceledAcquireCount.Add(1)
 		return err
 	}
@@ -225,9 +328,19 @@ func (c *Core[C]) popIdle() (*idleConn[C], int, bool) {
 // to reuse. The permit is released last so a waiter never wakes up before the
 // connection it is waiting for is visible.
 func (c *Core[C]) release(ic *idleConn[C], shardIdx int) {
+	c.checkedOut.Add(-1)
 	defer c.permits.release()
 
 	if c.closed.Load() || !c.recyclable(ic) {
+		c.destroy(ic)
+		return
+	}
+
+	// A shrink that landed while this connection was checked out is paid here.
+	// The permit debt alone bounds concurrent *checkouts*; without this the pool
+	// would keep the surplus connections open against the database, which is the
+	// resource the ceiling exists to protect.
+	if c.totalConns.Load() > c.maxConns.Load() {
 		c.destroy(ic)
 		return
 	}
@@ -374,7 +487,7 @@ func (c *Core[C]) Close() {
 		<-c.bgDone
 
 		ctx, cancel := context.WithTimeout(context.Background(), closeDrainTimeout)
-		c.permits.drain(ctx, c.config.MaxConns)
+		c.permits.drain(ctx, c.maxConns.Load())
 		cancel()
 
 		for i := range c.shards {
@@ -401,8 +514,9 @@ func (c *Core[C]) Stat() gpool.Stat {
 	return Stat{
 		total:     total,
 		idle:      idle,
-		active:    max(total-idle, 0),
-		maxConns:  c.config.MaxConns,
+		active:    c.checkedOut.Load(),
+		waiting:   c.waiting.Load(),
+		maxConns:  c.maxConns.Load(),
 		acquires:  c.acquireCount.Load(),
 		waitNanos: c.acquireWaitNanos.Load(),
 		empties:   c.emptyAcquireCount.Load(),
