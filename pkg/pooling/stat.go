@@ -15,6 +15,7 @@ type Stat struct {
 	total    int32
 	idle     int32
 	active   int32
+	waiting  int32
 	maxConns int32
 
 	acquires  int64
@@ -43,6 +44,11 @@ func (s Stat) ActiveConnections() int32 {
 // MaxConnections returns the configured ceiling.
 func (s Stat) MaxConnections() int32 {
 	return s.maxConns
+}
+
+// WaitingAcquires returns how many callers are parked for a connection right now.
+func (s Stat) WaitingAcquires() int32 {
+	return s.waiting
 }
 
 // AcquireCount returns how many connections have been successfully acquired.

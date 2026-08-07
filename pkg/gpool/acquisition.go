@@ -26,4 +26,14 @@ type Acquisition interface {
 	// CanceledAcquireCount returns how many acquisitions gave up because the
 	// caller's context ended first. A rising count means callers are timing out.
 	CanceledAcquireCount() int64
+
+	// WaitingAcquires returns how many callers are parked for a connection at
+	// this instant.
+	//
+	// This is the one gauge among these counters, and it answers a question none
+	// of the cumulative ones can: EmptyAcquireCount says the pool has been short
+	// at some point since it started, not that it is short now. A dashboard
+	// graphing saturation, or anything deciding whether to grow the pool, needs
+	// the instantaneous depth.
+	WaitingAcquires() int32
 }

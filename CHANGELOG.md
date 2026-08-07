@@ -18,7 +18,21 @@ the abstraction holds.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-07
+
+> **Upgrading from v0.3.0.** One breaking change: `gpool.Stat` gained
+> `WaitingAcquires() int32`. Anything that *consumes* a `Stat` is unaffected; only
+> a type implementing the interface itself needs the extra method. If you have one,
+> return the number of callers currently blocked in Acquire, or 0 if you do not
+> track it.
+
 ### Fixed
+
+- **`Stat.ActiveConnections()` could read high.** It was derived as
+  `total - idle`, two counters sampled independently, so a connection created by
+  the background warm-up but not yet visible in a shard counted as active. Anything
+  ranking pools by load multiplies by that number. It is now an exact count of
+  checked-out connections.
 
 - **MariaDB was a registered vendor that had never been run.** Both the pool and
   the CDC suites read `MYSQL_DSN` and used the MySQL flavour, so every MariaDB
@@ -33,6 +47,35 @@ the abstraction holds.
   Apple's `container`, which does run it.
 
 ### Added
+
+- **Runtime capacity control — `gpool.Resizable`.** `SetMaxConns` moves a pool's
+  ceiling while it is running, and `EvictIdle` discards every idle connection.
+  Both are optional capabilities reached by type assertion, like `BulkCopier` and
+  `Notifier`, and both are implemented once in `pkg/pooling` so every vendor gets
+  them.
+
+  `SetMaxConns` never blocks. Growing hands out permits immediately; shrinking
+  reclaims what is free and records the rest as debt that the next releases pay,
+  because waiting for a checked-out connection would make a resize block on user
+  code. Surplus connections are closed as they come back rather than pooled, so
+  the ceiling bounds connections to the database and not merely concurrent
+  checkouts.
+
+  Growth requires `Config.MaxConnsLimit`, declared at construction and defaulting
+  to `MaxConns`. A pool that can silently grow is a pool that can exhaust the
+  database, so the headroom is the operator's decision. Reserving it is free: the
+  permit set is a `struct{}` channel, whose element has no backing array at any
+  capacity.
+
+  `EvictIdle` exists because "the connections I hold are no longer the right ones"
+  is a state only the caller knows — a backend that changed role, a rotated
+  credential, a failover that kept the address. Closing and rebuilding the pool
+  discards connections that are still fine.
+
+- **`Stat.WaitingAcquires()`**, the number of callers parked for a connection at
+  this instant. It is the one gauge among the acquisition counters and answers what
+  none of the cumulative ones can: `EmptyAcquireCount` says the pool has been short
+  at some point since start-up, not that it is short now.
 
 - **`.junie/scripts/testdbs.sh`** brings up PostgreSQL, MySQL, MariaDB, ClickHouse
   and SQL Server with the settings the tests actually need — `wal_level=logical`,
@@ -290,6 +333,7 @@ test whose comment records the original failure mode.
 - PostgreSQL is the only vendor. The abstraction has not yet been proven against a
   second one.
 
-[Unreleased]: https://github.com/gsoultan/gpool/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/gsoultan/gpool/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/gsoultan/gpool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gsoultan/gpool/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/gsoultan/gpool/releases/tag/v0.1.0

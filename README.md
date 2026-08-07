@@ -21,7 +21,7 @@ behaviour:
 
 | Package | Contents |
 | :--- | :--- |
-| `pkg/gpool` | `Pool`, `Conn`, `Tx`, `Rows`, `Row`, `Result`, `Stat`, `Engine`, vendor registry, and the optional capabilities `BulkCopier`, `Batcher`, `Notifier` |
+| `pkg/gpool` | `Pool`, `Conn`, `Tx`, `Rows`, `Row`, `Result`, `Stat`, `Engine`, vendor registry, and the optional capabilities `BulkCopier`, `Batcher`, `Notifier`, `Resizable` |
 | `pkg/gpool/cdc` | `Subscriber` = `Stream` + `TableManager` + `Close`, plus `EventStream`, `Event`, `Position`, and the optional capability `ReplicationManager` |
 | `pkg/pooling` | The pooling engine: capacity, lock-striped idle buckets, reaper, lifecycle, statistics |
 | `pkg/sqldriver` | Shared pooling for any `database/sql` driver (standard library only) |

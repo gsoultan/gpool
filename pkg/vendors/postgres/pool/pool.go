@@ -72,6 +72,27 @@ func (p *Postgres) Stat() gpool.Stat {
 	return p.core.Stat()
 }
 
+// Capacity is owned by the engine, so every vendor gets Resizable for free by
+// delegating to it.
+var _ gpool.Resizable = (*Postgres)(nil)
+
+// MaxConns returns the ceiling currently in force.
+func (p *Postgres) MaxConns() int32 {
+	return p.core.MaxConns()
+}
+
+// SetMaxConns changes how many connections may be handed out at once, within
+// [MinConns, MaxConnsLimit]. It does not block.
+func (p *Postgres) SetMaxConns(n int32) error {
+	return translate(p.core.SetMaxConns(n))
+}
+
+// EvictIdle closes every idle connection and reports how many it closed.
+// Connections currently checked out are judged when they are released.
+func (p *Postgres) EvictIdle() int {
+	return p.core.EvictIdle()
+}
+
 // Exec acquires a connection, runs the statement, and releases the connection.
 func (p *Postgres) Exec(ctx context.Context, sql string, args ...any) (gpool.Result, error) {
 	conn, err := p.acquire(ctx)

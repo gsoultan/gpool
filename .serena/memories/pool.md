@@ -30,13 +30,38 @@ before, one allocation either way.
 
 ## Capacity
 
-`permits` (`permit.go`), a `chan struct{}` token set with `MaxConns` tokens. A permit
-is held for the whole time a connection is checked out, so `total <= MaxConns` holds
-structurally: a connection is only created while its acquirer holds a permit, and only
-pooled while one is being released. `warmUp` takes a permit for the same reason.
+`permits` (`permit.go`), a `chan struct{}` token set. A permit is held for the whole
+time a connection is checked out, so `total <= MaxConns` holds structurally: a
+connection is only created while its acquirer holds a permit, and only pooled while one
+is being released. `warmUp` takes a permit for the same reason.
 
 Not a counting semaphore — that cost a global mutex convoy and 3 allocations per
 contended acquire at high client concurrency. See `mem:scale`.
+
+**The set is resizable** (`Core.SetMaxConns`, exposed to library users as
+`gpool.Resizable`). The channel is allocated once at `MaxConnsLimit` and never
+replaced — swapping a channel out from under parked waiters would strand them — and
+sizing it generously costs nothing, since a `struct{}` element has no backing array at
+any capacity. `limit` holds the effective ceiling.
+
+Shrinking is the interesting half. It cannot reclaim a permit a caller is holding, and
+waiting for one would make a resize block on user code, so the shortfall becomes `debt`
+and the next `release` calls swallow their tokens instead of returning them. Two things
+must both happen or the ceiling is only half enforced:
+
+- the permit debt bounds concurrent *checkouts*, and
+- `Core.release` destroys a connection when `totalConns > maxConns`, which bounds
+  *connections to the server*.
+
+Missing the second one keeps every surplus connection open while correctly refusing new
+checkouts — caught by `TestSetMaxConns_ShrinkIsNonBlockingAndDeferred`, not by reading.
+
+`Close` drains `maxConns` tokens, not `cap(tokens)`: draining the channel's headroom
+waits for tokens that were never issued and costs the full `closeDrainTimeout`.
+
+`EvictIdle` closes every idle connection via `shard.takeIf`. Checked-out ones are judged
+on release. It exists because only the caller knows its connections have gone stale —
+role change, rotated credential, failover that kept the address.
 
 ## Sharding
 
@@ -76,9 +101,18 @@ round trip, and makes `Stat` lock-free.
 ## Statistics
 
 `gpool.Stat` composes `Occupancy` (total/idle/active/max) and `Acquisition`
-(acquire count, wait duration, empty and cancelled counts). Occupancy alone cannot
-distinguish a pool that is busy from one that is too small; `EmptyAcquireCount`
-against `AcquireCount` is the pressure signal.
+(acquire count, wait duration, empty and cancelled counts, plus `WaitingAcquires`).
+Occupancy alone cannot distinguish a pool that is busy from one that is too small;
+`EmptyAcquireCount` against `AcquireCount` is the pressure signal.
+
+`ActiveConnections` is an exact count of checked-out connections, not `total - idle`.
+The derived form samples two counters independently, so a connection the warm-up had
+created but not yet pushed to a shard counted as active — and a consumer ranking pools
+by load multiplies by that number.
+
+`WaitingAcquires` is the only gauge among the counters. `EmptyAcquireCount` says the
+pool has been short at some point since start-up; it cannot say whether it is short now,
+which is what a dashboard and anything driving `SetMaxConns` actually need.
 
 Only the blocking path is timed — `permits.tryAcquire()` vs `permits.wait()` exist
 to separate them. A clock read on the fast path would cost a meaningful fraction of
