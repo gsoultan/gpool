@@ -304,3 +304,35 @@ func TestStat_WaitingAcquiresIsAGauge(t *testing.T) {
 		t.Errorf("waiting = %d after everyone gave up, want 0 — the gauge leaked", got)
 	}
 }
+
+// SetMaxConns publishes the new ceiling in two places: the count reserveSlot
+// checks before dialling, and the permit set that bounds checkouts. take()
+// depends on the two agreeing — its reasoning is that a caller holding a permit
+// implies fewer than MaxConns others hold one, so an idle connection must be on
+// its way, which is why it may yield and retry rather than exceed the ceiling.
+//
+// Publishing them as two separate steps lets two callers resizing at once
+// interleave and leave the pair permanently disagreeing. With more permits than
+// the count admits, the surplus permit holders spin in take()'s Gosched loop
+// against a ceiling that will never let them in: a busy wait that burns a core
+// and never resolves.
+func TestSetMaxConns_ConcurrentResizesAgreeOnOneCeiling(t *testing.T) {
+	core, _ := newTestCore(t, Config{MaxConns: 4, MaxConnsLimit: 32, HealthCheckPeriod: -1})
+
+	// Each round is an independent trial: two callers resize to different values
+	// at the same time, and the pair is checked before the next round can paper
+	// over a divergence. Checking only at the end lets a lucky final ordering
+	// hide a bug that was present throughout.
+	for round := range 5000 {
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = core.SetMaxConns(4) })
+		wg.Go(func() { _ = core.SetMaxConns(32) })
+		wg.Wait()
+
+		if permitted, ceiling := core.permits.limitValue(), core.MaxConns(); permitted != ceiling {
+			t.Fatalf("round %d: permit limit is %d but the dialling ceiling is %d; take() assumes "+
+				"they are equal, and a permit holder above the ceiling spins in its retry loop forever",
+				round, permitted, ceiling)
+		}
+	}
+}
