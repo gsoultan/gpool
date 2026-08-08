@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/go-mysql-org/go-mysql v1.16.0
 	github.com/go-sql-driver/mysql v1.10.0
-	github.com/gsoultan/gpool v0.3.0
+	github.com/gsoultan/gpool v0.5.0
 	github.com/gsoultan/gpool/vendors/mysql v0.1.0
 )
 
