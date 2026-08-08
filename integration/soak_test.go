@@ -97,11 +97,26 @@ func takeSample(pool gpool.Pool) sample {
 // given time, and did not grow when the run was doubled. A leak keeps growing; a
 // transient settles, and waiting is what tells the two apart.
 func takeSettledSample(pool gpool.Pool) sample {
+	// The floor over the window rather than the last reading. Unwinding only ever
+	// adds goroutines, never removes ones that belong there, so the minimum is the
+	// settled count and anything above it is still in flight. Reading "three
+	// identical samples in a row" instead can lock onto a plateau that has not
+	// finished unwinding — which it did, under -race after forty thousand abuse
+	// cycles, reporting a phantom growth of six against a real drift of zero.
+	//
+	// This does not weaken what the test detects. A leaked goroutine is present in
+	// every sample, so it raises the floor exactly as it would raise the last
+	// reading.
+	settled := -1
 	previous, stable := -1, 0
+
 	for range 100 {
 		runtime.GC()
 
 		current := runtime.NumGoroutine()
+		if settled < 0 || current < settled {
+			settled = current
+		}
 		if current == previous {
 			stable++
 			if stable >= 3 {
@@ -113,7 +128,10 @@ func takeSettledSample(pool gpool.Pool) sample {
 		previous = current
 		time.Sleep(20 * time.Millisecond)
 	}
-	return takeSample(pool)
+
+	found := takeSample(pool)
+	found.goroutines = settled
+	return found
 }
 
 // A leak does not show up in a test that finishes in milliseconds. This one holds

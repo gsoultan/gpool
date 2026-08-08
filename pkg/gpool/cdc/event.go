@@ -55,6 +55,21 @@ type Event struct {
 	// it — so a consumer that must not process a change twice needs its own
 	// idempotency, not a tighter position.
 	Position Position
+	// Transaction identifies the transaction this change belongs to. Changes with
+	// equal values were committed together; changes with different values were
+	// not. That is the whole contract — it is a Position, so it is opaque, and
+	// nothing else about it is meaningful.
+	//
+	// This is what a consumer needs to replay a batch atomically rather than one
+	// row at a time. Note that a transaction can span more than one delivery: a
+	// stream may end mid-transaction and resume, and both halves carry the same
+	// value, so a consumer that must apply whole transactions needs to see the
+	// value change before it commits its own.
+	//
+	// It is the zero Position where the source does not report transaction
+	// boundaries.
+	Transaction Position
+
 	// Timestamp is when the transaction containing this change committed, as the
 	// source recorded it. Every change from one transaction carries the same value.
 	//

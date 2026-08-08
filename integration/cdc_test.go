@@ -517,3 +517,58 @@ func TestCDCOmitsUnchangedToastedColumns(t *testing.T) {
 		t.Fatal("an unchanged TOASTed column was reported as SQL NULL instead of being omitted")
 	}
 }
+
+// A consumer replaying downstream needs to know which changes were committed
+// together, so it can apply them atomically rather than one row at a time.
+// Event.Transaction is that grouping, and on PostgreSQL it is genuinely distinct
+// from Position: Position names the record, Transaction names the commit.
+func TestCDCGroupsChangesByTransaction(t *testing.T) {
+	f := newCDCFixture(t)
+	subscriber := f.subscribe(t)
+
+	stream, err := subscriber.Subscribe(t.Context())
+	if err != nil {
+		t.Fatalf("Subscribe() = %v", err)
+	}
+	defer stream.Close()
+
+	collected := make(chan []cdc.Event, 1)
+	go func() { collected <- collect(t, stream, 4, 20*time.Second) }()
+	time.Sleep(500 * time.Millisecond)
+
+	// Three rows in one transaction, then one row in another.
+	batch := fmt.Sprintf(
+		"BEGIN; INSERT INTO %s (email) VALUES ('t1'), ('t2'), ('t3'); COMMIT;", f.table)
+	if _, err := f.pool.Exec(t.Context(), batch); err != nil {
+		t.Fatalf("batched INSERT = %v", err)
+	}
+	if _, err := f.pool.Exec(t.Context(),
+		fmt.Sprintf("INSERT INTO %s (email) VALUES ('alone')", f.table)); err != nil {
+		t.Fatalf("INSERT = %v", err)
+	}
+
+	events := <-collected
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want 4", len(events))
+	}
+
+	first := events[0].Transaction
+	if first == cdc.NoPosition {
+		t.Fatal("events carry no transaction identity")
+	}
+	for i, event := range events[:3] {
+		if event.Transaction != first {
+			t.Errorf("event %d is in transaction %q, want %q — the batch was one transaction",
+				i, event.Transaction, first)
+		}
+	}
+	if events[3].Transaction == first {
+		t.Errorf("the fourth change reports the same transaction as the batch, but it was committed separately")
+	}
+
+	// Position names the record, Transaction names the commit; on PostgreSQL
+	// three changes in one transaction have three positions and one transaction.
+	if events[0].Position == events[1].Position {
+		t.Error("two changes in one transaction share a Position; it should name the record")
+	}
+}

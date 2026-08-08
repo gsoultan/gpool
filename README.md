@@ -449,15 +449,26 @@ On MySQL there is nothing to confirm — the source keeps no per-consumer state 
 
 ```go
 type Event struct {
-    Op       Op                // OpInsert, OpUpdate, OpDelete
-    Schema   string
-    Table    string
-    Position Position          // opaque; record it and pass it to SubscribeFrom
-    Before   map[string]any    // Update and Delete
-    After    map[string]any    // Insert and Update
+    Op          Op             // OpInsert, OpUpdate, OpDelete
+    Schema      string
+    Table       string
+    Position    Position       // opaque; record it and pass it to SubscribeFrom
+    Transaction Position       // equal values were committed together
+    Timestamp   time.Time      // the source's commit time
+    Before      map[string]any // Update and Delete
+    After       map[string]any // Insert and Update
 }
 ```
 
+- **`Transaction` groups changes that were committed together**, which is what a
+  consumer needs to replay a batch atomically rather than a row at a time. Equal
+  values mean one transaction; nothing else about the value is meaningful. Note a
+  transaction can span deliveries — a stream may end mid-transaction and resume —
+  so a consumer applying whole transactions should wait for the value to change
+  before committing its own.
+- **`Timestamp` is the source's commit time**, the same for every change in a
+  transaction. It is the origin's clock, not yours, and its resolution differs by
+  vendor: microseconds on PostgreSQL, whole seconds on MySQL.
 - `Before` and `After` are allocated per event and owned by you. They are safe to retain and to
   send to another goroutine.
 - **Value types differ by vendor.** PostgreSQL delivers every value as a `string`, exactly as

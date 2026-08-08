@@ -18,6 +18,34 @@ the abstraction holds.
 
 ## [Unreleased]
 
+### Added
+
+- **`Event.Transaction`** groups changes that were committed together, which is
+  what a consumer replaying downstream needs in order to apply a batch atomically
+  rather than a row at a time. Equal values mean one transaction and nothing else
+  about the value is meaningful, so it reuses `Position` rather than inventing a
+  type.
+
+  This was deferred at v0.3.0 because PostgreSQL and MySQL disagreed about what
+  identifies a transaction and the answer should not have been invented to fill a
+  field. With a third vendor the shape was obvious: every source names the commit
+  rather than the record — PostgreSQL in the Begin message's final LSN, MySQL in
+  the position that only advances at a commit, SQL Server in the `__$start_lsn`
+  its rows already share.
+
+### Fixed
+
+- **SQL Server `Subscribe` refused a database whose capture job had not yet
+  produced anything**, reporting that CDC was not enabled when it plainly was.
+  That is the normal state for the first seconds after enabling capture. An empty
+  log's beginning and end are the same place, so it now starts there.
+
+- **The goroutine soak test could fail without a leak.** It read the count after
+  three identical samples, which under `-race` can lock onto a plateau that has
+  not finished unwinding — reporting growth of six against a real drift of zero.
+  It now takes the floor over the sampling window, which unwinding cannot lower
+  and a leaked goroutine still raises.
+
 ## [0.5.0] - 2026-08-08
 
 > **Upgrading from v0.4.0.** Nothing breaks. `Event` gained a field, which no

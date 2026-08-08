@@ -78,8 +78,15 @@ func (s *SQLServer) Subscribe(ctx context.Context) (cdc.EventStream, error) {
 	if err := s.db.QueryRowContext(ctx, maxLSNSQL).Scan(&lsn); err != nil {
 		return nil, fmt.Errorf("gpool/mssql/cdc: reading the maximum LSN: %w", err)
 	}
-	if lsn == nil {
-		return nil, fmt.Errorf("%w: no capture instance has produced an LSN yet", ErrCDCNotEnabled)
+
+	// A NULL maximum means the capture job has not written anything anywhere in
+	// this database yet, which is the normal state for the first seconds after
+	// enabling capture. It is not an error and it is not "CDC is off" — the log
+	// is simply empty, so its beginning and its end are the same place, and
+	// starting from zero is starting from now. The per-instance clamp in the poll
+	// loop keeps that honest as instances begin producing.
+	if len(lsn) != lsnLen {
+		return s.subscribe(ctx, make([]byte, lsnLen))
 	}
 
 	// One past the last change, so "from now on" does not redeliver the change

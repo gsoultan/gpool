@@ -15,6 +15,11 @@ import (
 // becomes many. They all share a position: the binlog names a place in the log,
 // not a place within a statement, and resuming lands on the statement boundary
 // either way.
+//
+// That position doubles as the transaction identity. It only advances at a
+// commit, so every change from one transaction reports the same value and the
+// next transaction reports a different one — which is exactly what
+// Event.Transaction promises.
 func decodeRows(rows *replication.RowsEvent, op cdc.Op, names []string, at cdc.Position, committed time.Time) []cdc.Event {
 	schema, table := string(rows.Table.Schema), string(rows.Table.Table)
 
@@ -24,13 +29,14 @@ func decodeRows(rows *replication.RowsEvent, op cdc.Op, names []string, at cdc.P
 		events := make([]cdc.Event, 0, len(rows.Rows)/2)
 		for i := 0; i+1 < len(rows.Rows); i += 2 {
 			events = append(events, cdc.Event{
-				Op:        cdc.OpUpdate,
-				Schema:    schema,
-				Table:     table,
-				Position:  at,
-				Timestamp: committed,
-				Before:    columnMap(names, rows.Rows[i]),
-				After:     columnMap(names, rows.Rows[i+1]),
+				Op:          cdc.OpUpdate,
+				Schema:      schema,
+				Table:       table,
+				Position:    at,
+				Transaction: at,
+				Timestamp:   committed,
+				Before:      columnMap(names, rows.Rows[i]),
+				After:       columnMap(names, rows.Rows[i+1]),
 			})
 		}
 		return events
@@ -39,11 +45,12 @@ func decodeRows(rows *replication.RowsEvent, op cdc.Op, names []string, at cdc.P
 	events := make([]cdc.Event, 0, len(rows.Rows))
 	for _, row := range rows.Rows {
 		event := cdc.Event{
-			Op:        op,
-			Schema:    schema,
-			Table:     table,
-			Position:  at,
-			Timestamp: committed,
+			Op:          op,
+			Schema:      schema,
+			Table:       table,
+			Position:    at,
+			Transaction: at,
+			Timestamp:   committed,
 		}
 		if op == cdc.OpDelete {
 			event.Before = columnMap(names, row)

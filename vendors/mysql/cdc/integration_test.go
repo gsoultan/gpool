@@ -461,3 +461,54 @@ func TestMySQLCDCRegistersUnderBothVendorNames(t *testing.T) {
 		}
 	})
 }
+
+// Changes committed together must be reported as one transaction, so a consumer
+// can apply them atomically.
+func TestMySQLCDCGroupsChangesByTransaction(t *testing.T) {
+	eachTarget(t, func(t *testing.T, server target) {
+		f := newFixture(t, server)
+		subscriber := f.subscribe(t, "gpool."+f.table)
+
+		stream, err := subscriber.Subscribe(t.Context())
+		if err != nil {
+			t.Fatalf("Subscribe() = %v", err)
+		}
+		defer stream.Close()
+
+		collected := make(chan []cdc.Event, 1)
+		go func() { collected <- collect(t, stream, 4, 30*time.Second) }()
+
+		tx, err := f.db.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("BeginTx() = %v", err)
+		}
+		for _, email := range []string{"t1", "t2", "t3"} {
+			if _, err := tx.ExecContext(t.Context(),
+				fmt.Sprintf("INSERT INTO %s (email) VALUES (?)", f.table), email); err != nil {
+				t.Fatalf("INSERT %s = %v", email, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit() = %v", err)
+		}
+		f.exec(t, fmt.Sprintf("INSERT INTO %s (email) VALUES (?)", f.table), "alone")
+
+		events := <-collected
+		if len(events) != 4 {
+			t.Fatalf("got %d events, want 4", len(events))
+		}
+
+		first := events[0].Transaction
+		if first == cdc.NoPosition {
+			t.Fatal("events carry no transaction identity")
+		}
+		for i, event := range events[:3] {
+			if event.Transaction != first {
+				t.Errorf("event %d is in transaction %q, want %q", i, event.Transaction, first)
+			}
+		}
+		if events[3].Transaction == first {
+			t.Error("the fourth change reports the batch's transaction, but was committed separately")
+		}
+	})
+}

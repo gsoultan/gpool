@@ -11,9 +11,12 @@ import (
 	"github.com/jackc/pglogrepl"
 )
 
-// committed is the transaction commit time pgoutput reports in its Begin
-// message; every change decoded from that transaction carries it.
-var committed = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+// committed is what pgoutput reports in the Begin that opens a transaction.
+// Every change decoded from that transaction carries both of its fields.
+var committed = transaction{
+	position:  position(0xABCDEF),
+	committed: time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC),
+}
 
 func testRelation() *pglogrepl.RelationMessage {
 	return &pglogrepl.RelationMessage{
@@ -250,8 +253,16 @@ func assertHeader(t *testing.T, event cdc.Event, op cdc.Op, lsn uint64) {
 	}
 	// The commit time comes from the Begin that opened the transaction, so every
 	// change decoded from it carries the same value.
-	if !event.Timestamp.Equal(committed) {
-		t.Errorf("Timestamp = %s, want %s", event.Timestamp, committed)
+	if !event.Timestamp.Equal(committed.committed) {
+		t.Errorf("Timestamp = %s, want %s", event.Timestamp, committed.committed)
+	}
+	// The transaction is named by the commit LSN, which is the same for every
+	// change in it — and different from the per-record Position.
+	if event.Transaction != committed.position {
+		t.Errorf("Transaction = %q, want %q", event.Transaction, committed.position)
+	}
+	if event.Transaction == event.Position {
+		t.Error("Transaction equals Position; the commit LSN is not the record's own")
 	}
 }
 
