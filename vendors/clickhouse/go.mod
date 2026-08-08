@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
-	github.com/gsoultan/gpool v0.2.0
+	github.com/gsoultan/gpool v1.0.0
 )
 
 require (
