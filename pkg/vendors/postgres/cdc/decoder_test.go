@@ -3,11 +3,17 @@
 package cdc
 
 import (
+	"time"
+
 	"testing"
 
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
 	"github.com/jackc/pglogrepl"
 )
+
+// committed is the transaction commit time pgoutput reports in its Begin
+// message; every change decoded from that transaction carries it.
+var committed = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 
 func testRelation() *pglogrepl.RelationMessage {
 	return &pglogrepl.RelationMessage{
@@ -152,7 +158,7 @@ func TestDecodeOperations(t *testing.T) {
 		event := decodeInsert(rel, &pglogrepl.InsertMessage{
 			RelationID: rel.RelationID,
 			Tuple:      tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
-		}, lsn)
+		}, lsn, committed)
 
 		assertHeader(t, event, cdc.OpInsert, lsn)
 		if event.Before != nil {
@@ -170,7 +176,7 @@ func TestDecodeOperations(t *testing.T) {
 			RelationID: rel.RelationID,
 			OldTuple:   tuple(textColumn("1"), textColumn("old@example.com"), textColumn("x")),
 			NewTuple:   tuple(textColumn("1"), textColumn("new@example.com"), textColumn("x")),
-		}, lsn)
+		}, lsn, committed)
 
 		assertHeader(t, event, cdc.OpUpdate, lsn)
 		if event.Before["email"] != "old@example.com" {
@@ -188,7 +194,7 @@ func TestDecodeOperations(t *testing.T) {
 		event := decodeUpdate(rel, &pglogrepl.UpdateMessage{
 			RelationID: rel.RelationID,
 			NewTuple:   tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
-		}, lsn)
+		}, lsn, committed)
 
 		if event.Before != nil {
 			t.Errorf("Before = %v, want nil", event.Before)
@@ -201,7 +207,7 @@ func TestDecodeOperations(t *testing.T) {
 		event := decodeDelete(rel, &pglogrepl.DeleteMessage{
 			RelationID: rel.RelationID,
 			OldTuple:   tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
-		}, lsn)
+		}, lsn, committed)
 
 		assertHeader(t, event, cdc.OpDelete, lsn)
 		if event.After != nil {
@@ -241,6 +247,11 @@ func assertHeader(t *testing.T, event cdc.Event, op cdc.Op, lsn uint64) {
 	}
 	if event.Position != position(lsn) {
 		t.Errorf("Position = %q, want %q", event.Position, position(lsn))
+	}
+	// The commit time comes from the Begin that opened the transaction, so every
+	// change decoded from it carries the same value.
+	if !event.Timestamp.Equal(committed) {
+		t.Errorf("Timestamp = %s, want %s", event.Timestamp, committed)
 	}
 }
 

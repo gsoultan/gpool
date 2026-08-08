@@ -213,6 +213,14 @@ func TestMySQLCDCStreamsChanges(t *testing.T) {
 			if event.Position == cdc.NoPosition {
 				t.Errorf("event %d has no position", i)
 			}
+			// The binlog event header timestamps every event; a zero value means
+			// the header was read but the field never reached the consumer.
+			if event.Timestamp.IsZero() {
+				t.Errorf("event %d has no commit timestamp", i)
+			}
+			if age := time.Since(event.Timestamp); age > time.Hour || age < -time.Hour {
+				t.Errorf("event %d commit timestamp is %s, %s from now", i, event.Timestamp, age)
+			}
 		}
 
 		// Column names have to be resolved even under binlog_row_metadata=MINIMAL,

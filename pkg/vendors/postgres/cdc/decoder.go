@@ -3,6 +3,8 @@
 package cdc
 
 import (
+	"time"
+
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
 	"github.com/jackc/pglogrepl"
 )
@@ -15,38 +17,41 @@ const (
 )
 
 // decodeInsert converts an insert record into an event.
-func decodeInsert(rel *pglogrepl.RelationMessage, m *pglogrepl.InsertMessage, lsn uint64) cdc.Event {
+func decodeInsert(rel *pglogrepl.RelationMessage, m *pglogrepl.InsertMessage, lsn uint64, committed time.Time) cdc.Event {
 	return cdc.Event{
-		Op:       cdc.OpInsert,
-		Schema:   rel.Namespace,
-		Table:    rel.RelationName,
-		Position: position(lsn),
-		After:    decodeTuple(rel, m.Tuple),
+		Op:        cdc.OpInsert,
+		Schema:    rel.Namespace,
+		Table:     rel.RelationName,
+		Position:  position(lsn),
+		Timestamp: committed,
+		After:     decodeTuple(rel, m.Tuple),
 	}
 }
 
 // decodeUpdate converts an update record into an event. Before is populated only
 // for the columns the table's REPLICA IDENTITY covers, and is nil under the default
 // identity unless the primary key changed.
-func decodeUpdate(rel *pglogrepl.RelationMessage, m *pglogrepl.UpdateMessage, lsn uint64) cdc.Event {
+func decodeUpdate(rel *pglogrepl.RelationMessage, m *pglogrepl.UpdateMessage, lsn uint64, committed time.Time) cdc.Event {
 	return cdc.Event{
-		Op:       cdc.OpUpdate,
-		Schema:   rel.Namespace,
-		Table:    rel.RelationName,
-		Position: position(lsn),
-		Before:   decodeTuple(rel, m.OldTuple),
-		After:    decodeTuple(rel, m.NewTuple),
+		Op:        cdc.OpUpdate,
+		Schema:    rel.Namespace,
+		Table:     rel.RelationName,
+		Position:  position(lsn),
+		Timestamp: committed,
+		Before:    decodeTuple(rel, m.OldTuple),
+		After:     decodeTuple(rel, m.NewTuple),
 	}
 }
 
 // decodeDelete converts a delete record into an event.
-func decodeDelete(rel *pglogrepl.RelationMessage, m *pglogrepl.DeleteMessage, lsn uint64) cdc.Event {
+func decodeDelete(rel *pglogrepl.RelationMessage, m *pglogrepl.DeleteMessage, lsn uint64, committed time.Time) cdc.Event {
 	return cdc.Event{
-		Op:       cdc.OpDelete,
-		Schema:   rel.Namespace,
-		Table:    rel.RelationName,
-		Position: position(lsn),
-		Before:   decodeTuple(rel, m.OldTuple),
+		Op:        cdc.OpDelete,
+		Schema:    rel.Namespace,
+		Table:     rel.RelationName,
+		Position:  position(lsn),
+		Timestamp: committed,
+		Before:    decodeTuple(rel, m.OldTuple),
 	}
 }
 
