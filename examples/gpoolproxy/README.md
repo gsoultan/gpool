@@ -47,7 +47,7 @@ refused outright if it is readable beyond its owner.
 Clients then connect to the proxy instead of the database:
 
 ```
-postgres://app:secret@proxy:6432/postgres?default_query_exec_mode=exec
+postgres://app:secret@proxy:6432/postgres
 ```
 
 ## Measured against PgBouncer
@@ -131,21 +131,46 @@ Any target whose URL is unset is skipped, so a partial comparison still runs.
 
 ## What it does and does not implement
 
-Implemented: transaction-mode pooling, SCRAM-SHA-256 with clients, optional TLS
-on the client side, query cancellation (translated from the proxy's key to the
-backend's), bounded clients, and rollback of a transaction whose client
-disconnected.
+Implemented: transaction-mode pooling, **named prepared statements**,
+SCRAM-SHA-256 with clients, optional TLS on the client side, query cancellation
+(translated from the proxy's key to the backend's), bounded clients, and rollback
+of a transaction whose client disconnected.
 
 Not implemented, deliberately: session and statement pooling modes, an admin
 console (`SHOW POOLS`), online reconfiguration, `md5` and `trust` authentication,
-and multiple upstream databases. Each is real work rather than an oversight.
+a bound on how many prepared statements a backend may accumulate, and multiple
+upstream databases. Each is real work rather than an oversight.
 
-**Prepared statements have the same limitation PgBouncer had before 1.21.** A
-client that caches statement names will find them missing when transaction-mode
-pooling moves it to another backend. Connect with `default_query_exec_mode=exec`,
-which still binds parameters server-side and only stops the names being cached.
-Tracking them per backend, as PgBouncer 1.21+ does, is the main thing standing
-between this example and something production-worthy.
+### Prepared statements
+
+A named prepared statement lives on the backend that parsed it, and transaction
+pooling moves a client to a different backend on every transaction. The proxy
+remembers each client's `Parse` messages and replays them onto whichever backend
+the next transaction lands on — the same answer PgBouncer reached in 1.21. Clients
+can use pgx's default execution mode; `default_query_exec_mode=exec` is no longer
+needed.
+
+Two details are what make it correct rather than merely working:
+
+- **Two clients may use the same statement name for different SQL.** Replaying
+  blindly would leave whichever got there first in place and silently run their
+  query for the other — wrong results, not an error. A name already present on a
+  backend is closed and re-parsed.
+- **An injected `Parse` produces a `ParseComplete` the client never asked for.**
+  A client counts replies to its own messages, so those completions are swallowed
+  on the way back rather than forwarded.
+
+Both are covered by tests that fail without the feature, with
+`SQLSTATE 42P05: prepared statement "…" already exists`.
+
+The cost was not measurable against this benchmark's noise: reading three of the
+roughly five messages per query into a reused buffer and looking up a name, set
+against a round trip of tens of microseconds.
+
+What it does not do: statements are never proactively deallocated, so a backend
+accumulates one entry per distinct statement it has seen until a client closes it
+or a name collides. PgBouncer bounds this with `max_prepared_statements`; this
+example does not.
 
 **LISTEN/NOTIFY cannot work** through transaction-mode pooling, here or in
 PgBouncer: a subscription needs a session, which is what transaction pooling
@@ -159,6 +184,7 @@ README.
 | `proxy.go` | listener, client bounding, cancellation registry |
 | `session.go` | one client: startup, authentication, the two relay goroutines |
 | `relay.go` | byte-level message forwarding, transaction-unit accounting |
+| `statements.go` | prepared statement tracking and replay across backends |
 | `driver.go` | `pooling.Driver` — dial, judge, clean up |
 | `backend.go` | one server connection at the raw protocol level |
 | `scram.go` | SCRAM-SHA-256, server half |

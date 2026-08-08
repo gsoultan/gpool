@@ -83,6 +83,13 @@ func endsTransactionUnit(kind byte) bool {
 type relay struct {
 	header [headerSize]byte
 	buf    []byte
+
+	// msg holds one whole message for the few types that must be understood
+	// before being sent on. Reused across calls and grown as needed, so the
+	// common case — an unnamed Parse, a Bind, a Describe, all of them small and
+	// all of them per query — allocates nothing. Whatever is kept beyond the call
+	// is copied out by the caller.
+	msg []byte
 }
 
 func newRelay() *relay {
@@ -141,6 +148,39 @@ func (r *relay) forwardBody(dst *bufio.Writer, src *bufio.Reader, bodyLen int) (
 		remaining -= chunk
 	}
 	return nil, nil
+}
+
+// readBody reads a message body into memory instead of forwarding it.
+//
+// Used only for the few message types that name a prepared statement, which have
+// to be understood before they can be sent on.
+//
+// The returned slice is valid until the next call. A caller that keeps it — the
+// Parse behind a named statement — copies it out.
+func (r *relay) readBody(src *bufio.Reader, bodyLen int) ([]byte, error) {
+	need := headerSize + bodyLen
+	if cap(r.msg) < need {
+		r.msg = make([]byte, need)
+	}
+
+	message := r.msg[:need]
+	copy(message, r.header[:])
+	if _, err := io.ReadFull(src, message[headerSize:]); err != nil {
+		return nil, err
+	}
+	return message, nil
+}
+
+// discardBody drops a message the peer sent but the other side must not see.
+func (r *relay) discardBody(src *bufio.Reader, bodyLen int) error {
+	for bodyLen > 0 {
+		chunk := min(bodyLen, len(r.buf))
+		if _, err := io.ReadFull(src, r.buf[:chunk]); err != nil {
+			return err
+		}
+		bodyLen -= chunk
+	}
+	return nil
 }
 
 // forward moves one whole message, for a direction that does not need to look at

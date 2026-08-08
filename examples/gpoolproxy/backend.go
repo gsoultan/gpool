@@ -35,6 +35,15 @@ type backend struct {
 	// release, whether anything needs rolling back.
 	txStatus byte
 
+	// prepared is the Parse message behind each named prepared statement that
+	// currently exists on this connection.
+	//
+	// It outlives the session that created it, because the statements really do:
+	// nothing deallocates them when a client goes away. Keeping the message
+	// rather than just the name is what lets a later client's identically named
+	// but different statement be detected instead of silently executed.
+	prepared map[string][]byte
+
 	broken atomic.Bool
 }
 

@@ -119,13 +119,38 @@ a difference between them — an early run reported PgBouncer at both 4,798 and
 And do not repeat the mistake of comparing at unmatched pool size; see
 `mem:testing`.
 
+## Prepared statements survive transaction pooling
+
+A named statement lives on the backend that parsed it, and pooling moves the
+client every transaction. `statements.go` remembers each client's Parse messages
+and `reconcile` replays them onto whichever backend the next transaction lands
+on — PgBouncer's 1.21 answer.
+
+Two things make it correct rather than merely working, and both would be silent
+if got wrong:
+
+- **A name already on the backend may be another client's, with different SQL.**
+  Not re-parsing would run their statement for this client — wrong results, not
+  an error. Any collision is closed first, then re-parsed.
+- **An injected Parse produces a ParseComplete the client never sent a Parse
+  for.** Clients count replies to their own messages, so `s.expect` queues the
+  completions to swallow and `relayFrom` drops them. Same for the injected Close
+  and its CloseComplete.
+
+`readBody` reuses `relay.msg` rather than allocating: only P/B/D/C are read into
+memory, and those are per query. Overhead was below the benchmark's noise floor —
+which was ±20% with five databases on the host, so the honest claim is "not
+measurable here", not "free".
+
+Tests fail without it with `SQLSTATE 42P05`, proven by disabling `reconcile`.
+
 ## Known gaps, deliberate
 
-Prepared statements have PgBouncer's pre-1.21 limitation — a cached statement
-name is missing after transaction pooling moves the client. Clients connect with
-`default_query_exec_mode=exec`. Per-backend tracking is the main thing between
-this and something production-worthy. No session or statement pooling mode, no
-admin console, no online reconfiguration, no md5/trust auth.
+Statements are never proactively deallocated, so a backend accumulates one entry
+per distinct statement until a client closes it or a name collides — PgBouncer
+bounds this with `max_prepared_statements` and this does not. No session or
+statement pooling mode, no admin console, no online reconfiguration, no md5/trust
+auth.
 
 LISTEN/NOTIFY and logical replication cannot traverse it, for the same reasons
 they cannot traverse PgBouncer. See `mem:pool` and `mem:cdc`.
