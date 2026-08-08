@@ -26,6 +26,14 @@ type Config struct {
 	// MinConns is the number of idle connections kept warm. Defaults to 0.
 	MinConns int32
 
+	// MaxConnsLimit is the hard ceiling SetMaxConns may raise MaxConns to.
+	//
+	// Defaults to MaxConns, which makes the pool resizable downwards only: growth
+	// has to be budgeted for, because a pool that can grow without bound is how a
+	// database runs out of connections. Set it to the largest number this pool may
+	// ever hold and MaxConns to what it should hold now.
+	MaxConnsLimit int32
+
 	// MaxConnIdleTime is how long a connection may sit idle before it is closed.
 	// Defaults to 30 minutes; negative disables idle expiry.
 	MaxConnIdleTime time.Duration
@@ -64,6 +72,7 @@ func (c Config) pooling() pooling.Config {
 	return pooling.Config{
 		MaxConns:          c.MaxConns,
 		MinConns:          c.MinConns,
+		MaxConnsLimit:     c.MaxConnsLimit,
 		MaxConnIdleTime:   c.MaxConnIdleTime,
 		MaxConnLifetime:   c.MaxConnLifetime,
 		HealthCheckPeriod: c.HealthCheckPeriod,

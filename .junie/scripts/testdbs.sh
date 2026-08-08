@@ -40,7 +40,44 @@ readonly ALL_ENGINES=(postgres mysql mariadb clickhouse mssql)
 die() { printf '%s\n' "$*" >&2; exit 1; }
 note() { printf '  %s\n' "$*"; }
 
-command -v container >/dev/null 2>&1 || die "Apple's 'container' is not installed: brew install container"
+# --- container runtime --------------------------------------------------------
+# Apple's `container` locally, Docker in CI. They differ in three places that
+# matter here — how memory is spelled, how a platform is selected, and how
+# running containers are listed — so those are wrapped rather than sprinkled
+# through the engine definitions.
+if command -v container >/dev/null 2>&1 && container system status >/dev/null 2>&1; then
+  readonly RUNTIME="container"
+elif command -v docker >/dev/null 2>&1; then
+  readonly RUNTIME="docker"
+else
+  die "no container runtime found: install Apple's 'container' or Docker"
+fi
+
+run_container() { "${RUNTIME}" run "$@"; }
+exec_container() { "${RUNTIME}" exec "$@"; }
+
+# running lists the names of running containers, one per line.
+running() {
+  if [ "${RUNTIME}" = container ]; then
+    container ls 2>/dev/null | awk 'NR>1 {print $1}'
+  else
+    docker ps --format '{{.Name}}{{.Names}}' 2>/dev/null
+  fi
+}
+
+is_running() { running | grep -qx "$1"; }
+
+# amd64_flags selects an x86-64 image. Only SQL Server needs it, and only on an
+# arm64 host — a CI runner is already x86-64, where forcing the platform is at
+# best redundant and at worst refused.
+amd64_flags() {
+  [ "$(uname -m)" = "x86_64" ] && return 0
+  if [ "${RUNTIME}" = container ]; then
+    printf -- '--arch amd64 -m 4G -c 4'
+  else
+    printf -- '--platform linux/amd64 --memory 4g --cpus 4'
+  fi
+}
 
 # --- per-engine settings ------------------------------------------------------
 # Ports are offset well clear of a local install's defaults, so a running
@@ -87,17 +124,17 @@ start_engine() {
   port="$(port_of "$engine")"
   image="$(image_of "$engine")"
 
-  if container ls 2>/dev/null | grep -q "^${name} "; then
+  if is_running "${name}"; then
     note "${engine}: already running"
     return 0
   fi
-  container rm "${name}" >/dev/null 2>&1 || true
+  "${RUNTIME}" rm -f "${name}" >/dev/null 2>&1 || true
 
   case "$engine" in
     postgres)
       # wal_level=logical is what makes a replication slot possible at all; the
       # CDC tests skip themselves without it rather than fail confusingly.
-      container run -d --rm --name "${name}" -p "${port}:5432" \
+      run_container -d --rm --name "${name}" -p "${port}:5432" \
         -e POSTGRES_PASSWORD="${PG_PASSWORD}" \
         "${image}" \
         -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 \
@@ -106,7 +143,7 @@ start_engine() {
     mysql)
       # ROW format carries the before-image CDC needs; GTIDs make a recorded
       # position survive a failover, which a file offset does not.
-      container run -d --rm --name "${name}" -p "${port}:3306" \
+      run_container -d --rm --name "${name}" -p "${port}:3306" \
         -e MYSQL_ROOT_PASSWORD="${MY_PASSWORD}" -e MYSQL_DATABASE=gpool \
         "${image}" \
         --log-bin=mysql-bin --binlog-format=ROW --server-id=1 \
@@ -115,13 +152,13 @@ start_engine() {
     mariadb)
       # MariaDB's GTIDs are always on and are written differently from MySQL's,
       # which is exactly why the CDC vendor has a separate flavour.
-      container run -d --rm --name "${name}" -p "${port}:3306" \
+      run_container -d --rm --name "${name}" -p "${port}:3306" \
         -e MARIADB_ROOT_PASSWORD="${MY_PASSWORD}" -e MARIADB_DATABASE=gpool \
         "${image}" \
         --log-bin=mariadb-bin --binlog-format=ROW --server-id=1 >/dev/null
       ;;
     clickhouse)
-      container run -d --rm --name "${name}" -p "${port}:9000" \
+      run_container -d --rm --name "${name}" -p "${port}:9000" \
         -e CLICKHOUSE_PASSWORD="${CH_PASSWORD}" -e CLICKHOUSE_DB=gpool \
         -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
         "${image}" >/dev/null
@@ -134,8 +171,8 @@ start_engine() {
       # needs emulation, and whether that works is a property of the host rather
       # than of gpool — so a failure here is reported plainly instead of being
       # retried into a confusing timeout.
-      container run -d --rm --name "${name}" -p "${port}:1433" \
-        --arch amd64 -m 4G -c 4 \
+      run_container -d --rm --name "${name}" -p "${port}:1433" \
+        $(amd64_flags) \
         -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD="${MSSQL_PASSWORD}" -e MSSQL_PID=Developer \
         -e MSSQL_AGENT_ENABLED=true \
         "${image}" >/dev/null 2>&1 || {
@@ -152,11 +189,11 @@ start_engine() {
 ready_engine() {
   local engine="$1" name="${PREFIX}-$1"
   case "$engine" in
-    postgres)   container exec "${name}" pg_isready -q ;;
-    mysql)      container exec "${name}" mysqladmin ping -uroot -p"${MY_PASSWORD}" --silent ;;
-    mariadb)    container exec "${name}" mariadb-admin ping -uroot -p"${MY_PASSWORD}" --silent ;;
-    clickhouse) container exec "${name}" clickhouse-client --password "${CH_PASSWORD}" --query "SELECT 1" ;;
-    mssql)      container exec "${name}" /opt/mssql-tools18/bin/sqlcmd -C \
+    postgres)   exec_container "${name}" pg_isready -q ;;
+    mysql)      exec_container "${name}" mysqladmin ping -uroot -p"${MY_PASSWORD}" --silent ;;
+    mariadb)    exec_container "${name}" mariadb-admin ping -uroot -p"${MY_PASSWORD}" --silent ;;
+    clickhouse) exec_container "${name}" clickhouse-client --password "${CH_PASSWORD}" --query "SELECT 1" ;;
+    mssql)      exec_container "${name}" /opt/mssql-tools18/bin/sqlcmd -C \
                   -S localhost -U sa -P "${MSSQL_PASSWORD}" -Q "SELECT 1" ;;
   esac >/dev/null 2>&1
 }
@@ -165,11 +202,11 @@ ready_engine() {
 provision() {
   [ "$1" = mssql ] || return 0
 
-  container exec "${PREFIX}-mssql" /opt/mssql-tools18/bin/sqlcmd -C \
+  exec_container "${PREFIX}-mssql" /opt/mssql-tools18/bin/sqlcmd -C \
     -S localhost -U sa -P "${MSSQL_PASSWORD}" -Q "
 IF DB_ID('${MSSQL_CDC_DB}') IS NULL CREATE DATABASE ${MSSQL_CDC_DB};" >/dev/null 2>&1 || return 1
 
-  container exec "${PREFIX}-mssql" /opt/mssql-tools18/bin/sqlcmd -C \
+  exec_container "${PREFIX}-mssql" /opt/mssql-tools18/bin/sqlcmd -C \
     -S localhost -U sa -P "${MSSQL_PASSWORD}" -d "${MSSQL_CDC_DB}" -Q "
 IF (SELECT is_cdc_enabled FROM sys.databases WHERE name = '${MSSQL_CDC_DB}') = 0
   EXEC sys.sp_cdc_enable_db;" >/dev/null 2>&1 || return 1
@@ -185,7 +222,7 @@ wait_ready() {
       provision "${engine}" || note "${engine}: provisioning failed"
       return 0
     fi
-    if ! container ls 2>/dev/null | grep -q "^${PREFIX}-${engine} "; then
+    if ! is_running "${PREFIX}-${engine}"; then
       note "${engine}: container exited — check: container logs ${PREFIX}-${engine}"
       return 1
     fi
@@ -221,8 +258,8 @@ cmd_down() {
   local engines=("$@")
   [ ${#engines[@]} -eq 0 ] && engines=("${ALL_ENGINES[@]}")
   for engine in "${engines[@]}"; do
-    container stop "${PREFIX}-${engine}" >/dev/null 2>&1 && note "${engine}: stopped" || true
-    container rm "${PREFIX}-${engine}" >/dev/null 2>&1 || true
+    "${RUNTIME}" stop "${PREFIX}-${engine}" >/dev/null 2>&1 && note "${engine}: stopped" || true
+    "${RUNTIME}" rm -f "${PREFIX}-${engine}" >/dev/null 2>&1 || true
   done
 }
 
@@ -244,7 +281,7 @@ cmd_status() {
   printf '%-12s %-9s %-8s %s\n' ENGINE STATE READY ADDRESS
   for engine in "${ALL_ENGINES[@]}"; do
     local state=stopped ready=no
-    if container ls 2>/dev/null | grep -q "^${PREFIX}-${engine} "; then
+    if is_running "${PREFIX}-${engine}"; then
       state=running
       ready_engine "${engine}" && ready=yes
     fi

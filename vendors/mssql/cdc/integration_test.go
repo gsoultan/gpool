@@ -5,9 +5,9 @@ package cdc_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -376,8 +376,11 @@ func TestSQLServerCDCReportsADatabaseWithoutCapture(t *testing.T) {
 	if err == nil {
 		t.Fatal("Subscribe() succeeded against master, which cannot have CDC")
 	}
-	if !strings.Contains(err.Error(), "change data capture") {
-		t.Errorf("error should name the missing capability, got: %v", err)
+	// The sentinel, not the wording. A consumer branches on errors.Is, so a test
+	// that matches the message would keep passing after the sentinel stopped
+	// being returned.
+	if !errors.Is(err, mssqlcdc.ErrCDCNotEnabled) {
+		t.Errorf("Subscribe() = %v, want ErrCDCNotEnabled", err)
 	}
 }
 
@@ -426,5 +429,43 @@ COMMIT TRANSACTION;`, f.table))
 	}
 	if events[3].Transaction == first {
 		t.Error("the fourth change reports the batch's transaction, but was committed separately")
+	}
+}
+
+// SQL Server discards changes on a timer — three days by default — rather than
+// when a consumer confirms them, so a position older than that names changes
+// that no longer exist. Starting from whatever remains would be a stream with a
+// hole in it that looks complete, which is why it is refused.
+func TestSQLServerCDCRefusesAnExpiredPosition(t *testing.T) {
+	f := newFixture(t)
+	subscriber := f.subscribe(t, "dbo."+f.table)
+
+	// The capture job has to have produced something, or there is no oldest LSN
+	// to be older than.
+	f.exec(t, fmt.Sprintf("INSERT INTO dbo.%s (id, email) VALUES (1, 'x')", f.table))
+	// go-mssqldb takes ordinal placeholders, not '?'. Using the wrong one here
+	// does not fail the test — it makes every poll error, so the loop burns its
+	// whole deadline and the assertion then passes for an unrelated reason.
+	instance := "dbo_" + f.table
+	var oldest []byte
+	deadline := time.Now().Add(captureWait)
+	for time.Now().Before(deadline) {
+		if err := f.db.QueryRowContext(t.Context(),
+			"SELECT sys.fn_cdc_get_min_lsn(@p1)", instance).Scan(&oldest); err != nil {
+			t.Fatalf("reading the oldest retained LSN = %v", err)
+		}
+		if len(oldest) > 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if len(oldest) == 0 {
+		t.Fatalf("%s never reported an oldest LSN, so there is nothing to be older than", instance)
+	}
+
+	// All zeros is below every real LSN, so it is unambiguously expired.
+	_, err := subscriber.SubscribeFrom(t.Context(), "0x00000000000000000000")
+	if !errors.Is(err, mssqlcdc.ErrPositionExpired) {
+		t.Fatalf("SubscribeFrom(zero) = %v, want ErrPositionExpired", err)
 	}
 }

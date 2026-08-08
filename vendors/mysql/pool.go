@@ -19,6 +19,7 @@ func New(config Config) (gpool.Pool, error) {
 	return sqldriver.New(sqldriver.Config{
 		Connector:         connector,
 		MaxConns:          config.MaxConns,
+		MaxConnsLimit:     config.MaxConnsLimit,
 		MinConns:          config.MinConns,
 		MaxConnIdleTime:   config.MaxConnIdleTime,
 		MaxConnLifetime:   config.MaxConnLifetime,

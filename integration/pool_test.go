@@ -453,3 +453,58 @@ func TestPoolReapsExpiredConnections(t *testing.T) {
 	}
 	t.Fatalf("expired connections were never reaped: %d still open", pool.Stat().TotalConnections())
 }
+
+// Resizable's contract is that headroom is "declared at construction". Until
+// MaxConnsLimit reached the vendor configs there was no way to declare it, the
+// engine defaulted the hard ceiling to MaxConns, and every pool was resizable
+// downwards only — with an error telling the caller to raise a limit that no
+// Config exposed.
+func TestResizableGrowsWhenHeadroomIsDeclared(t *testing.T) {
+	pool := newPool(t, postgrespool.Config{MaxConns: 2, MaxConnsLimit: 8, HealthCheckPeriod: -1})
+
+	resizable, ok := pool.(gpool.Resizable)
+	if !ok {
+		t.Fatal("the PostgreSQL pool is not Resizable")
+	}
+	if err := resizable.SetMaxConns(8); err != nil {
+		t.Fatalf("SetMaxConns(8) with a limit of 8 = %v", err)
+	}
+
+	// Returning nil is not the claim; holding eight at once is. Two would have
+	// deadlocked this before the ceiling moved.
+	conns := make([]gpool.Conn, 0, 8)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	for i := range 8 {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquiring connection %d of 8 after growing = %v", i+1, err)
+		}
+		conns = append(conns, conn)
+	}
+	for i := range conns {
+		conns[i].Release()
+	}
+
+	if err := resizable.SetMaxConns(9); err == nil {
+		t.Error("SetMaxConns(9) succeeded past the declared limit of 8")
+	}
+}
+
+// Without declared headroom the pool still refuses to grow, which is the point:
+// a pool that can grow without bound is how a database runs out of connections.
+func TestResizableRefusesToGrowWithoutHeadroom(t *testing.T) {
+	pool := newPool(t, postgrespool.Config{MaxConns: 2, HealthCheckPeriod: -1})
+
+	resizable, ok := pool.(gpool.Resizable)
+	if !ok {
+		t.Fatal("the PostgreSQL pool is not Resizable")
+	}
+	if err := resizable.SetMaxConns(4); err == nil {
+		t.Error("grew beyond MaxConns without MaxConnsLimit being declared")
+	}
+	// Shrinking never needed headroom.
+	if err := resizable.SetMaxConns(1); err != nil {
+		t.Errorf("SetMaxConns(1) = %v", err)
+	}
+}

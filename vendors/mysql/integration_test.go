@@ -438,3 +438,37 @@ func TestNewRejectsBadDSN(t *testing.T) {
 		t.Errorf("New() with a malformed DSN = %v, want ErrInvalidConfig", err)
 	}
 }
+
+// The same on the database/sql side, which reaches the engine through a
+// different Config and so needed the field wired separately.
+func TestResizableGrowsWhenHeadroomIsDeclared(t *testing.T) {
+	eachTarget(t, func(t *testing.T, server target) {
+		pool := newPool(t, server, mysql.Config{MaxConns: 2, MaxConnsLimit: 6, HealthCheckPeriod: -1})
+
+		resizable, ok := pool.(gpool.Resizable)
+		if !ok {
+			t.Fatal("the pool is not Resizable")
+		}
+		if err := resizable.SetMaxConns(6); err != nil {
+			t.Fatalf("SetMaxConns(6) with a limit of 6 = %v", err)
+		}
+
+		conns := make([]gpool.Conn, 0, 6)
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		for i := range 6 {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("acquiring connection %d of 6 after growing = %v", i+1, err)
+			}
+			conns = append(conns, conn)
+		}
+		for i := range conns {
+			conns[i].Release()
+		}
+
+		if err := resizable.SetMaxConns(7); err == nil {
+			t.Error("SetMaxConns(7) succeeded past the declared limit of 6")
+		}
+	})
+}
