@@ -1,7 +1,7 @@
 # Gpool: A Go Connection Pooling & CDC Library
 
 Gpool is a Go 1.26-native **library** for connection pooling — PostgreSQL, MySQL, MariaDB,
-SQL Server and ClickHouse — with Change Data Capture for PostgreSQL and MySQL. It is designed to be embedded in your application or composed into another library — there
+SQL Server and ClickHouse — with Change Data Capture for PostgreSQL, MySQL and SQL Server. It is designed to be embedded in your application or composed into another library — there
 is no daemon, no CLI, no config file, no logger, and no process-global state.
 
 ## 📦 Installation
@@ -36,7 +36,7 @@ behaviour:
 | PostgreSQL | `github.com/gsoultan/gpool` | `pgx/v5` | ✅ logical replication |
 | MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
 | MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
-| SQL Server | `github.com/gsoultan/gpool/vendors/mssql` | `microsoft/go-mssqldb` | — |
+| SQL Server | `github.com/gsoultan/gpool/vendors/mssql` | `microsoft/go-mssqldb` | ✅ change tables |
 | ClickHouse | `github.com/gsoultan/gpool/vendors/clickhouse` | `clickhouse-go/v2` | — |
 
 MySQL CDC is a module of its own again, nested inside the pool vendor at
@@ -56,11 +56,11 @@ is unset, so an untested vendor reports as skipped rather than as passing.
 | PostgreSQL | ✅ | ✅ | 17.10, `wal_level=logical` |
 | MySQL | ✅ | ✅ | 8.4.11, `binlog_format=ROW`, GTID on, `binlog_row_metadata=MINIMAL` |
 | MariaDB | ✅ | ✅ | 11.8.8, `binlog_format=ROW` |
-| SQL Server | ✅ | — | 2022 (16.0.4265.3) |
+| SQL Server | ✅ | ✅ | 2022 (16.0.4265.3) |
 | ClickHouse | ✅ | — | 24.10.2.80 |
 
-SQL Server and ClickHouse have **no CDC implementation**; the dash means absent, not
-untested. `gpool.NewSubscriber` reports that with `ErrNoCDCSupport` rather than
+ClickHouse has **no CDC implementation**; the dash means absent, not untested — it
+has no change log to read. `gpool.NewSubscriber` reports that with `ErrNoCDCSupport` rather than
 suggesting an import that would not help.
 
 MySQL's CDC is exercised under `binlog_row_metadata=MINIMAL` deliberately — the
@@ -348,6 +348,44 @@ Requires `binlog_format=ROW` and an account with `REPLICATION SLAVE`, plus `SELE
 > **`ServerID` has no default, deliberately.** The source treats a subscriber as a replica, and two
 > consumers sharing an ID make it disconnect one of them repeatedly without explaining why.
 
+### SQL Server
+
+```go
+import (
+    "github.com/gsoultan/gpool/pkg/gpool"
+    mssqlpool "github.com/gsoultan/gpool/vendors/mssql"
+    mssqlcdc "github.com/gsoultan/gpool/vendors/mssql/cdc"
+)
+
+subscriber, err := gpool.NewSubscriber(mssqlpool.SQLServer, mssqlcdc.Config{
+    DSN:    "sqlserver://user:pass@host:1433?database=app",
+    Tables: []string{"dbo.users"},
+})
+if err != nil {
+    return err
+}
+defer subscriber.Close()
+
+// Capture is server-side DDL here, not a client filter: this enables it.
+if err := subscriber.AddTables(ctx, "dbo.users"); err != nil {
+    return err
+}
+
+stream, err := subscriber.SubscribeFrom(ctx, checkpoint)
+```
+
+CDC lives in the pool vendor's module because it needs no dependency the pool does
+not already have. Requires a database with `sys.sp_cdc_enable_db` run on it —
+not `master`, which cannot have CDC — and **SQL Server Agent running**, because
+the capture job is what fills the change tables. Without the Agent,
+`sp_cdc_enable_table` succeeds, the change tables are created, and they stay
+empty forever, which looks exactly like an idle database.
+
+> **Changes arrive on the capture job's schedule**, roughly five seconds by
+> default, not as transactions commit. `PollInterval` controls how often gpool
+> reads the change tables; it cannot make a source that captures slowly deliver
+> quickly.
+
 ### Positions and resuming
 
 Every event carries a `Position` — an opaque, vendor-defined marker. Record it,
@@ -369,13 +407,15 @@ not process a change twice needs its own idempotency.
 
 The difference between vendors is not cosmetic and loses data if assumed away:
 
-| | PostgreSQL | MySQL |
-| :--- | :--- | :--- |
-| who records your position | the server, in the slot | nobody |
-| `Subscribe()` with no position | resumes from the slot, losing nothing | starts at the **end of the log**, skipping everything since |
-| resuming needs client state | no | **yes** — only `SubscribeFrom` |
-| falling behind costs | the primary's disk fills | the logs expire and **changes are lost** |
-| what a position looks like | `0/1A2B3C4D` | `gtid:3E11FA47-…:1-5` or `file:mysql-bin.000042:1234` |
+| | PostgreSQL | MySQL | SQL Server |
+| :--- | :--- | :--- | :--- |
+| how changes are read | tail the WAL | tail the binlog | **poll change tables** |
+| who records your position | the server, in the slot | nobody | nobody |
+| `Subscribe()` with no position | resumes from the slot, losing nothing | starts at the **end of the log** | starts at the **end of the log** |
+| resuming needs client state | no | **yes** | **yes** |
+| falling behind costs | the primary's disk fills | logs expire, **changes lost** | cleanup job runs, **changes lost** |
+| delivery latency | as it commits | as it commits | **the capture job's schedule** |
+| what a position looks like | `0/1A2B3C4D` | `gtid:3E11FA47-…:1-5` | `0x0000002B00000582001C` |
 
 Positions are opaque and vendor-specific: never compare two from different vendors, and do not
 assume they sort lexically. Passing one vendor's position to another's `SubscribeFrom` is refused

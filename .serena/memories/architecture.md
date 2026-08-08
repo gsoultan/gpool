@@ -17,6 +17,9 @@ unimportable and is the reason the tree was restructured.
   `ReplicationManager` + `Close`. Also `EventStream`, `Event`, `Op`.
 - `pkg/vendors/postgres/pool` — pgx/v5.
 - `pkg/vendors/postgres/cdc` — pglogrepl.
+- `vendors/mssql/cdc` — SQL Server change tables, a package *inside* the pool
+  vendor's module because it needs no dependency the pool lacks. The third CDC
+  vendor and the first that polls rather than tails. See `mem:cdc_mssql`.
 - `vendors/mysql/cdc` — binary log, its own module nested in the pool vendor
   (11 modules against 47). The second CDC vendor, and therefore the thing that
   proved `pkg/gpool/cdc` was not PostgreSQL-shaped. See `mem:cdc_mysql`.
