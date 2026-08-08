@@ -593,6 +593,9 @@ Three further things to know:
 
 - **Leave `ResetQuery` empty.** PgBouncer already runs `server_reset_query` itself;
   adding gpool's own is a second round trip that buys nothing.
+- **Prepared statements work.** The proxy replays a client's `Parse` onto
+  whichever backend the next transaction lands on, so pgx's default execution
+  mode is fine.
 - **`Notifier` will not work** through transaction mode. A `LISTEN` needs a stable
   session, which is precisely what transaction pooling refuses to give.
 - **CDC must bypass PgBouncer entirely.** It does not proxy replication

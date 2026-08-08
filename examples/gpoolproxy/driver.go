@@ -73,6 +73,7 @@ func (d *backendDriver) Connect(ctx context.Context) (*backend, error) {
 		pid:      hijacked.PID,
 		secret:   hijacked.SecretKey,
 		txStatus: txIdle,
+		prepared: make(map[string][]byte),
 	}, nil
 }
 

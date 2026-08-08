@@ -82,12 +82,14 @@ func startProxy(t *testing.T, pool pooling.Config) string {
 		}
 	})
 
-	// Transaction-mode pooling moves a client between backends, so a client-side
-	// prepared statement cache would reference names the next backend has never
-	// seen. Exec mode still binds parameters server-side; it only stops the names
-	// being cached. PgBouncer needs the same of a client below 1.21.
 	return fmt.Sprintf("postgres://%s:%s@%s/postgres?sslmode=disable&default_query_exec_mode=exec",
 		proxyUser, proxyPassword, proxy.Addr())
+}
+
+// cachingURL is the same proxy with pgx's statement cache left on, which is the
+// default and the mode that names its prepared statements.
+func cachingURL(url string) string {
+	return strings.Replace(url, "&default_query_exec_mode=exec", "", 1)
 }
 
 func connect(t *testing.T, url string) *pgx.Conn {
@@ -362,5 +364,119 @@ func TestUserlistAcceptsBothSecretForms(t *testing.T) {
 	}
 	if got, _ := users.lookup("hashed"); got.String() != credential.String() {
 		t.Error("stored verifier was not preserved")
+	}
+}
+
+// Named prepared statements have to survive a client moving between backends,
+// which is what transaction pooling does on every transaction. Without the proxy
+// replaying the Parse, the second backend has never heard of the statement and
+// the client fails — the limitation PgBouncer carried until 1.21, and the one
+// this example's README used to name as its gap.
+//
+// pgx's default execution mode is the test: it caches statements under generated
+// names, so every query after the first is a Bind against a name that only one
+// backend knows.
+func TestProxyKeepsPreparedStatementsAcrossBackends(t *testing.T) {
+	url := cachingURL(startProxy(t, pooling.Config{MaxConns: 2}))
+
+	// More clients than backends, so each is repeatedly handed a connection some
+	// other client last prepared on.
+	var wg sync.WaitGroup
+	var failures atomic.Int64
+
+	for range 8 {
+		wg.Go(func() {
+			conn, err := pgx.Connect(context.Background(), url)
+			if err != nil {
+				failures.Add(1)
+				return
+			}
+			defer conn.Close(context.Background())
+
+			for i := range 40 {
+				var answer int
+				if err := conn.QueryRow(context.Background(), "SELECT $1::int + 1", i).Scan(&answer); err != nil {
+					t.Errorf("query %d: %v", i, err)
+					failures.Add(1)
+					return
+				}
+				if answer != i+1 {
+					t.Errorf("query %d returned %d", i, answer)
+					failures.Add(1)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	if failures.Load() > 0 {
+		t.Fatalf("%d clients failed with the statement cache enabled", failures.Load())
+	}
+}
+
+// Two clients may use the same statement name for different SQL. Replaying
+// blindly would leave whichever got there first in place and silently run their
+// query for the other — wrong results rather than an error, which is the worst
+// outcome available. The proxy has to notice and re-parse.
+func TestProxyIsolatesIdenticallyNamedStatements(t *testing.T) {
+	// One backend, so both clients are guaranteed to share it.
+	url := cachingURL(startProxy(t, pooling.Config{MaxConns: 1}))
+
+	first := connect(t, url)
+	second := connect(t, url)
+
+	// The same name, deliberately, for different SQL.
+	if _, err := first.Prepare(t.Context(), "shared", "SELECT 111"); err != nil {
+		t.Fatalf("first Prepare() = %v", err)
+	}
+	if _, err := second.Prepare(t.Context(), "shared", "SELECT 222"); err != nil {
+		t.Fatalf("second Prepare() = %v", err)
+	}
+
+	// Interleaved, so each turn lands on a backend the other one last used.
+	for range 10 {
+		var got int
+		if err := first.QueryRow(t.Context(), "shared").Scan(&got); err != nil {
+			t.Fatalf("first query = %v", err)
+		}
+		if got != 111 {
+			t.Fatalf("first client got %d, want 111 — it ran the other client's statement", got)
+		}
+
+		if err := second.QueryRow(t.Context(), "shared").Scan(&got); err != nil {
+			t.Fatalf("second query = %v", err)
+		}
+		if got != 222 {
+			t.Fatalf("second client got %d, want 222 — it ran the other client's statement", got)
+		}
+	}
+}
+
+// Deallocating a statement has to reach the backend and be forgotten on both
+// sides, or a later client inherits a name the proxy believes is prepared.
+func TestProxyForgetsClosedStatements(t *testing.T) {
+	url := cachingURL(startProxy(t, pooling.Config{MaxConns: 1}))
+	conn := connect(t, url)
+
+	if _, err := conn.Prepare(t.Context(), "temporary", "SELECT 7"); err != nil {
+		t.Fatalf("Prepare() = %v", err)
+	}
+	var got int
+	if err := conn.QueryRow(t.Context(), "temporary").Scan(&got); err != nil || got != 7 {
+		t.Fatalf("prepared query = %d, %v", got, err)
+	}
+
+	if err := conn.Deallocate(t.Context(), "temporary"); err != nil {
+		t.Fatalf("Deallocate() = %v", err)
+	}
+
+	// Re-preparing the same name with different SQL must take effect rather than
+	// resurrect what was deallocated.
+	if _, err := conn.Prepare(t.Context(), "temporary", "SELECT 8"); err != nil {
+		t.Fatalf("second Prepare() = %v", err)
+	}
+	if err := conn.QueryRow(t.Context(), "temporary").Scan(&got); err != nil || got != 8 {
+		t.Fatalf("after re-preparing = %d, %v; the old statement survived", got, err)
 	}
 }

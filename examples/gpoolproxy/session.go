@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -58,6 +59,16 @@ type session struct {
 	held     pooling.Handle[*backend]
 	attached bool
 
+	// statements is every prepared statement this client has created, kept so it
+	// can be replayed onto whichever backend the next transaction lands on.
+	statements *statements
+
+	// expect is the completion messages the backend owes for work this proxy
+	// injected rather than the client sending it. They are swallowed on the way
+	// back, because a client counting replies to its own messages must not
+	// receive one for a message it never sent.
+	expect []byte
+
 	// pending counts client messages that will each be answered with exactly one
 	// ReadyForQuery. A backend goes back to the pool only when this reaches zero,
 	// so a pipelined client is fully answered before its backend is handed on.
@@ -73,14 +84,15 @@ func newSession(proxy *Proxy, conn net.Conn, key cancelKey) *session {
 	ctx, stop := context.WithCancel(proxy.ctx)
 
 	return &session{
-		proxy:  proxy,
-		conn:   conn,
-		reader: bufio.NewReaderSize(conn, clientBufSize),
-		writer: bufio.NewWriterSize(conn, clientBufSize),
-		key:    key,
-		attach: make(chan *backend, 1),
-		ctx:    ctx,
-		stop:   stop,
+		proxy:      proxy,
+		conn:       conn,
+		reader:     bufio.NewReaderSize(conn, clientBufSize),
+		writer:     bufio.NewWriterSize(conn, clientBufSize),
+		key:        key,
+		statements: newStatements(),
+		attach:     make(chan *backend, 1),
+		ctx:        ctx,
+		stop:       stop,
 	}
 }
 
@@ -352,6 +364,18 @@ func (s *session) pump() {
 
 // forward sends one client message onward under the attachment lock.
 func (s *session) forward(forwarder *relay, kind byte, bodyLen int) error {
+	// Messages that name a prepared statement have to be understood before they
+	// can be sent on, so they are read into memory first. Everything else — every
+	// Execute, every CopyData, the bulk of the traffic — is still relayed without
+	// being decoded.
+	var message []byte
+	if namesStatement(kind) {
+		var err error
+		if message, err = forwarder.readBody(s.reader, bodyLen); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -359,10 +383,20 @@ func (s *session) forward(forwarder *relay, kind byte, bodyLen int) error {
 	if err != nil {
 		return err
 	}
-	if _, err := forwarder.forwardBody(target.writer, s.reader, bodyLen); err != nil {
+
+	if message != nil {
+		if err := s.reconcile(target, kind, message); err != nil {
+			return err
+		}
+		if _, err := target.writer.Write(message); err != nil {
+			target.fail()
+			return err
+		}
+	} else if _, err := forwarder.forwardBody(target.writer, s.reader, bodyLen); err != nil {
 		target.fail()
 		return err
 	}
+
 	if endsTransactionUnit(kind) {
 		s.pending++
 	}
@@ -371,6 +405,102 @@ func (s *session) forward(forwarder *relay, kind byte, bodyLen int) error {
 		return err
 	}
 	return nil
+}
+
+// reconcile makes the backend hold the prepared statement the message refers to.
+//
+// This is what makes named prepared statements survive transaction pooling. A
+// statement lives on the backend that parsed it, and the next transaction may
+// land somewhere else; replaying the remembered Parse first is the whole trick,
+// and it is what PgBouncer added in 1.21.
+//
+// The caller holds s.mu.
+func (s *session) reconcile(target *backend, kind byte, message []byte) error {
+	body := message[headerSize:]
+
+	switch kind {
+	case msgParse:
+		name, ok := parseName(body)
+		if !ok || name == "" {
+			// The unnamed statement is replaced by every Parse and never replayed.
+			return nil
+		}
+		// A name already on this backend belongs to whoever put it there, which
+		// may be a different client with different SQL. Re-parsing over it fails
+		// with 42P05, and *not* re-parsing would silently run their statement
+		// instead of this one — so it is closed first, either way.
+		if _, held := target.prepared[name]; held {
+			if err := s.inject(target, closeStatement(name), msgCloseComplete); err != nil {
+				return err
+			}
+		}
+		s.statements.remember(name, message)
+		target.prepared[name] = s.statements.byName[name]
+
+	case msgBind, msgDescribe, msgClose:
+		name, ok := statementNameOf(kind, body)
+		if !ok || name == "" {
+			return nil
+		}
+		if kind == msgClose {
+			// The client is deallocating it, so neither side should remember it.
+			delete(target.prepared, name)
+			s.statements.forget(name)
+			return nil
+		}
+		if err := s.ensurePrepared(target, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensurePrepared replays a remembered Parse onto a backend that lacks it.
+func (s *session) ensurePrepared(target *backend, name string) error {
+	remembered, known := s.statements.lookup(name)
+	if !known {
+		// The client is binding something it never parsed on this session. The
+		// server will say so; forwarding is more honest than inventing an error.
+		return nil
+	}
+	if held, ok := target.prepared[name]; ok && bytes.Equal(held, remembered) {
+		return nil
+	}
+	if _, ok := target.prepared[name]; ok {
+		if err := s.inject(target, closeStatement(name), msgCloseComplete); err != nil {
+			return err
+		}
+	}
+
+	if err := s.inject(target, remembered, msgParseComplete); err != nil {
+		return err
+	}
+	target.prepared[name] = remembered
+	return nil
+}
+
+// inject writes a message the client did not send, and records the completion
+// the backend will answer with so the relay can swallow it.
+func (s *session) inject(target *backend, message []byte, completion byte) error {
+	if _, err := target.writer.Write(message); err != nil {
+		target.fail()
+		return err
+	}
+	s.expect = append(s.expect, completion)
+	return nil
+}
+
+// swallows reports whether the next backend message answers something this proxy
+// injected, and consumes the expectation if so.
+func (s *session) swallows(kind byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.expect) == 0 || s.expect[0] != kind {
+		return false
+	}
+	s.expect = s.expect[1:]
+	return true
 }
 
 // ensureBackend attaches a pooled backend if the session has none. The caller
@@ -409,7 +539,25 @@ func (s *session) relay() {
 // reports whether the session may continue.
 func (s *session) relayFrom(forwarder *relay, source *backend) bool {
 	for {
-		kind, body, err := forwarder.forward(s.writer, source.reader)
+		kind, bodyLen, err := forwarder.readHeader(source.reader)
+		if err != nil {
+			source.fail()
+			s.stop()
+			return false
+		}
+
+		// A completion for a Parse or Close this proxy injected is not the
+		// client's to see: it is counting replies to its own messages.
+		if s.swallows(kind) {
+			if err := forwarder.discardBody(source.reader, bodyLen); err != nil {
+				source.fail()
+				s.stop()
+				return false
+			}
+			continue
+		}
+
+		body, err := forwarder.forwardBody(s.writer, source.reader, bodyLen)
 		if err != nil {
 			source.fail()
 			s.stop()
