@@ -56,6 +56,33 @@ podman run -d --rm --name gpool-test -e POSTGRES_PASSWORD=postgres -p 55432:5432
 
 CDC fixtures must drop their slot in cleanup. An abandoned slot retains WAL forever.
 
+Or bring up all five engines at once, which is what CI does:
+
+```
+./.junie/scripts/testdbs.sh up && eval "$(./.junie/scripts/testdbs.sh env)"
+```
+
+## Continuous integration
+
+`.github/workflows/ci.yml`: format and vet, unit tests with no database, the
+integration matrix against all five engines, govulncheck, and — on tags only — a
+build from an empty module against the published version.
+
+Three things about it are load-bearing:
+
+- **Every module is vetted and tested separately.** `go vet ./...` in the root does
+  not descend into a nested module, so a vendor could break while the root stayed
+  green.
+- **`testdbs.sh` is the only place the databases are defined.** `services:` cannot
+  pass arguments to a container and every engine here needs them. One definition,
+  used on a laptop and in CI, is what stops the two testing different things.
+- **A missing DSN fails the job.** A test that skips looks exactly like a test that
+  passed, which is how the whole matrix could quietly become a no-op.
+
+The tag-only consumer job exists because a `replace` directive hides a wrong
+`require` version — everything builds here and fails for whoever downloads it. See
+`mem:vendors`. It has caught four.
+
 ## Failure injection: what a failover looks like from the pool
 
 `integration/failure_test.go` (pgx path) and `vendors/mysql/failure_test.go`
