@@ -5,6 +5,7 @@ package cdc_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -510,5 +511,84 @@ func TestMySQLCDCGroupsChangesByTransaction(t *testing.T) {
 		if events[3].Transaction == first {
 			t.Error("the fourth change reports the batch's transaction, but was committed separately")
 		}
+	})
+}
+
+// Under binlog_row_metadata=MINIMAL — the default — a binlog row carries values
+// with no names, so the names come from information_schema, which describes the
+// table as it is now rather than as it was when the row was written. A stream
+// resuming across an ALTER TABLE therefore meets rows whose column count no
+// longer matches, and that is genuinely ambiguous: reporting it is the only
+// honest option, because guessing would hand the consumer values under names
+// that may not be theirs.
+func TestMySQLCDCReportsASchemaMismatch(t *testing.T) {
+	eachTarget(t, func(t *testing.T, server target) {
+		f := newFixture(t, server)
+
+		var metadata string
+		if err := f.db.QueryRowContext(t.Context(), "SELECT @@GLOBAL.binlog_row_metadata").Scan(&metadata); err != nil {
+			t.Skipf("cannot read binlog_row_metadata: %v", err)
+		}
+		// Only FULL puts the names in the log. MINIMAL and MariaDB's NO_LOG both
+		// leave the catalog as the only source, which is the case this exercises.
+		if strings.EqualFold(metadata, "FULL") {
+			t.Skipf("binlog_row_metadata is FULL; the names travel with the row and cannot disagree")
+		}
+
+		subscriber := f.subscribe(t, "gpool."+f.table)
+		stream, err := subscriber.Subscribe(t.Context())
+		if err != nil {
+			t.Fatalf("Subscribe() = %v", err)
+		}
+
+		// One row written under the three-column schema.
+		f.exec(t, fmt.Sprintf("INSERT INTO %s (id, email, score) VALUES (1, 'before', 10)", f.table))
+		first := collect(t, stream, 1, 30*time.Second)
+		if len(first) != 1 {
+			t.Fatalf("got %d events, want 1", len(first))
+		}
+		checkpoint := first[0].Position
+		_ = stream.Close()
+
+		// Now the table loses a column, so the catalog no longer describes the
+		// row that is about to be replayed.
+		f.exec(t, fmt.Sprintf("ALTER TABLE %s DROP COLUMN score", f.table))
+
+		// A *fresh* subscriber, deliberately. The one that already streamed the row
+		// has the old column names cached, and those names are still the right ones
+		// for that row — so it decodes it correctly and reports nothing. The
+		// mismatch belongs to a consumer that starts cold and has only the catalog
+		// to go on, which is what a restarted process is.
+		fresh, err := gpool.NewSubscriber(server.vendor, f.config(t, "gpool."+f.table))
+		if err != nil {
+			t.Fatalf("NewSubscriber() = %v", err)
+		}
+		t.Cleanup(func() { _ = fresh.Close() })
+
+		resumed, err := fresh.SubscribeFrom(t.Context(), checkpoint)
+		if err != nil {
+			t.Fatalf("SubscribeFrom(%q) = %v", checkpoint, err)
+		}
+		defer resumed.Close()
+
+		// Draining is how a consumer finds out; Err is how it learns why. Bounded,
+		// because a stream that neither delivers nor ends is itself the failure and
+		// must not present as a hung test.
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for range resumed.All() {
+			}
+		}()
+		select {
+		case <-drained:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the stream neither ended nor reported a mismatch")
+		}
+
+		if err := resumed.Err(); !errors.Is(err, mysqlcdc.ErrSchemaMismatch) {
+			t.Fatalf("stream ended with %v, want ErrSchemaMismatch", err)
+		}
+		t.Logf("reported: %v", resumed.Err())
 	})
 }

@@ -1,0 +1,207 @@
+# Copyright (c) 2026 Gembit Soultan Shirazi <gembit.soultan@gmail.com>. All rights reserved.
+#
+# gpool is six Go modules and five database engines, and until now every one of
+# them was verified by hand. That is how MariaDB and SQL Server stayed documented
+# as supported for weeks while never having been run.
+#
+# The integration job brings the databases up with the same script a developer
+# uses, rather than declaring them again in YAML. `services:` cannot pass
+# arguments to a container, and every engine here needs them — PostgreSQL will not
+# hand out a replication slot without wal_level=logical, MySQL and MariaDB have
+# nothing for CDC to read without row-format binary logging, and SQL Server's
+# capture job never runs without its Agent. One definition, used both places, is
+# what stops CI and a laptop testing different things.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26.5'
+
+jobs:
+  check:
+    name: Format and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l . | grep -v '^graphify-out/' || true)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      # Every module separately: `go vet ./...` in the root does not descend into
+      # a nested module, so a vendor could break while the root stayed green.
+      - name: go vet
+        run: |
+          status=0
+          for module in . vendors/mysql vendors/mysql/cdc vendors/mssql vendors/clickhouse examples/gpoolproxy; do
+            echo "==> $module"
+            (cd "$module" && go vet ./...) || status=1
+          done
+          exit $status
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # No database. These are the tests that must never need one, and running
+      # them apart from the integration job is what keeps that true.
+      - name: go test -race
+        run: |
+          status=0
+          for module in . vendors/mysql vendors/mysql/cdc vendors/mssql vendors/clickhouse examples/gpoolproxy; do
+            echo "==> $module"
+            (cd "$module" && go test -race -count=1 ./...) || status=1
+          done
+          exit $status
+
+  integration:
+    name: Integration (5 engines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # x86-64, so SQL Server runs natively here rather than under the emulation
+      # a developer on Apple silicon needs.
+      - name: Start databases
+        run: ./.junie/scripts/testdbs.sh up
+
+      - name: Report what came up
+        run: ./.junie/scripts/testdbs.sh status
+
+      - name: PostgreSQL — pool, CDC and failure injection
+        run: |
+          eval "$(./.junie/scripts/testdbs.sh env)"
+          go test -race -count=1 -timeout 20m ./integration/
+
+      - name: MySQL and MariaDB — pool and failure injection
+        run: |
+          eval "$(./.junie/scripts/testdbs.sh env)"
+          cd vendors/mysql && go test -race -count=1 -timeout 20m ./...
+
+      - name: MySQL and MariaDB — CDC
+        run: |
+          eval "$(./.junie/scripts/testdbs.sh env)"
+          cd vendors/mysql/cdc && go test -race -count=1 -timeout 20m ./...
+
+      - name: SQL Server — pool and CDC
+        run: |
+          eval "$(./.junie/scripts/testdbs.sh env)"
+          cd vendors/mssql && go test -race -count=1 -timeout 20m ./...
+
+      - name: ClickHouse — pool
+        run: |
+          eval "$(./.junie/scripts/testdbs.sh env)"
+          cd vendors/clickhouse && go test -race -count=1 -timeout 20m ./...
+
+      - name: gpoolproxy
+        run: |
+          eval "$(./.junie/scripts/testdbs.sh env)"
+          cd examples/gpoolproxy && go test -race -count=1 -timeout 20m ./...
+
+      # A test that skips because its DSN was unset looks exactly like a test that
+      # passed. This is what stops the whole matrix quietly becoming a no-op.
+      - name: Fail if the databases were never reachable
+        if: always()
+        run: |
+          eval "$(./.junie/scripts/testdbs.sh env)"
+          missing=""
+          for name in DATABASE_URL MYSQL_DSN MARIADB_DSN MSSQL_DSN MSSQL_CDC_DSN CLICKHOUSE_DSN; do
+            [ -z "${!name}" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::these engines never became ready, so their tests skipped:$missing"
+            ./.junie/scripts/testdbs.sh status
+            exit 1
+          fi
+
+      - name: Stop databases
+        if: always()
+        run: ./.junie/scripts/testdbs.sh down
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          status=0
+          for module in . vendors/mysql vendors/mysql/cdc vendors/mssql vendors/clickhouse examples/gpoolproxy; do
+            echo "==> $module"
+            (cd "$module" && govulncheck ./...) || status=1
+          done
+          exit $status
+
+  consumer:
+    name: Installable from the module proxy
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # A replace directive in this repository hides a wrong `require` version:
+      # everything builds here and fails for whoever downloads it. This has caught
+      # three real mismatches, so it runs on every tag, from an empty module with
+      # no replace directives at all.
+      - name: Build against the published tag
+        run: |
+          version="${GITHUB_REF_NAME}"
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          cat > go.mod <<EOF
+          module consumer
+
+          go ${GO_VERSION}
+          EOF
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+              "fmt"
+
+              "github.com/gsoultan/gpool/pkg/gpool"
+              "github.com/gsoultan/gpool/pkg/gpool/cdc"
+              postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
+          )
+
+          func main() {
+              _, _ = gpool.NewPool(gpool.Postgres, postgrespool.Config{ConnString: "postgres://u:p@h/d"})
+              var e cdc.Event
+              fmt.Println(e.Position, e.Transaction, e.Timestamp)
+          }
+          EOF
+          GOFLAGS=-mod=mod go get "github.com/gsoultan/gpool@${version}"
+          go mod tidy
+          go build ./...
+          echo "installable at ${version}"

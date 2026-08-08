@@ -31,7 +31,12 @@ type Pool struct {
 	core *pooling.Core[*conn]
 }
 
-var _ gpool.Pool = (*Pool)(nil)
+var (
+	_ gpool.Pool = (*Pool)(nil)
+	// Runtime capacity control is implemented once in the engine, so every
+	// database/sql vendor gets it rather than it being a PostgreSQL privilege.
+	_ gpool.Resizable = (*Pool)(nil)
+)
 
 // New creates a pool from a driver.Connector.
 func New(config Config) (*Pool, error) {
@@ -73,6 +78,26 @@ func (p *Pool) Close() {
 // Stat reports occupancy and cumulative acquisition counters. It is lock-free.
 func (p *Pool) Stat() gpool.Stat {
 	return p.core.Stat()
+}
+
+// MaxConns returns the ceiling currently in force, which may differ from the
+// value the pool was constructed with.
+func (p *Pool) MaxConns() int32 {
+	return p.core.MaxConns()
+}
+
+// SetMaxConns changes how many connections may be handed out at once, within
+// [MinConns, MaxConnsLimit]. It does not block: growing takes effect at once,
+// and shrinking is applied as checked-out connections come back rather than by
+// waiting for them.
+func (p *Pool) SetMaxConns(n int32) error {
+	return p.core.SetMaxConns(n)
+}
+
+// EvictIdle closes every idle connection and reports how many it closed.
+// Connections currently checked out are judged when they are released.
+func (p *Pool) EvictIdle() int {
+	return p.core.EvictIdle()
 }
 
 // Exec acquires a connection, runs the statement, and releases the connection.

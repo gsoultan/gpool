@@ -26,6 +26,49 @@ reason and the migration.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Resizable` could only ever shrink, on every vendor.** Growth is bounded by
+  `MaxConnsLimit`, which the engine defaults to `MaxConns` — and no vendor
+  `Config` had the field, so there was no way to declare the headroom. The error
+  even said "raise the limit at construction", which was not possible. Every
+  vendor config now exposes it, and the tests prove a grown pool really holds the
+  extra connections rather than merely returning nil.
+
+- **`database/sql` pools did not implement `Resizable` at all**, so runtime
+  capacity control was a PostgreSQL privilege that MySQL, MariaDB, SQL Server and
+  ClickHouse silently lacked. It is implemented once in `pkg/sqldriver`, so every
+  one of them has it.
+
+Both were found by writing the godoc example for `Resizable`: the example did not
+compile, because the field it needed did not exist.
+
+### Added
+
+- **Continuous integration**, on GitHub Actions. Format and vet, unit tests with
+  no database, the full integration matrix against all five engines, govulncheck,
+  and — on tags only — a build from an empty module against the published version,
+  which is the check that has caught three wrong `require` versions.
+
+  The integration job brings the databases up with `.junie/scripts/testdbs.sh`,
+  the same script a developer uses, rather than declaring them again in YAML.
+  `services:` cannot pass arguments to a container and every engine here needs
+  them. It also fails loudly if any engine never became reachable, because a test
+  that skips for a missing DSN looks exactly like a test that passed.
+
+  `testdbs.sh` now speaks Docker as well as Apple's `container`, and only forces
+  an x86-64 platform for SQL Server when the host is not already x86-64 — CI
+  runners are, so it runs natively there.
+
+- **Nine godoc examples**, so pkg.go.dev shows compiling code rather than prose.
+
+- **`errors.Is` coverage for every CDC sentinel.** `ErrPositionExpired`,
+  `ErrSchemaMismatch` and `ErrCDCNotEnabled` were documented API with no test
+  asserting the sentinel — one matched on the message text, which would have kept
+  passing after the sentinel stopped being returned. `ErrSchemaMismatch` is
+  exercised by resuming a stream across an `ALTER TABLE`, which is the situation
+  it exists for.
+
 ### Added
 
 - **Failure-injection tests.** The pool bounds connection lifetime precisely
