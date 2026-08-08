@@ -61,7 +61,7 @@ running() {
   if [ "${RUNTIME}" = container ]; then
     container ls 2>/dev/null | awk 'NR>1 {print $1}'
   else
-    docker ps --format '{{.Name}}{{.Names}}' 2>/dev/null
+    docker ps --format '{{.Names}}' 2>/dev/null
   fi
 }
 
@@ -270,8 +270,12 @@ cmd_env() {
     if ready_engine "${engine}"; then
       # An engine may declare more than one variable, so each line is exported
       # rather than only the first.
+      # Emitted as NAME='value'. A MySQL DSN contains tcp(host:port), and
+      # unquoted parentheses are a syntax error in bash — which zsh tolerates, so
+      # this only shows up somewhere else, such as CI.
       dsn_of "${engine}" | while IFS= read -r setting; do
-        [ -n "${setting}" ] && echo "export ${setting}"
+        [ -n "${setting}" ] || continue
+        echo "export ${setting%%=*}='${setting#*=}'"
       done
     fi
   done
