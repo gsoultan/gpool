@@ -31,6 +31,9 @@ readonly CH_PASSWORD="clickhouse"
 # SQL Server refuses to start on a password it considers weak, and says so only
 # in the log, several seconds after appearing to launch cleanly.
 readonly MSSQL_PASSWORD='Str0ng!Passw0rd'
+# sp_cdc_enable_db refuses to run on master, so CDC tests need a database of
+# their own with capture switched on.
+readonly MSSQL_CDC_DB="gpoolcdc"
 
 readonly ALL_ENGINES=(postgres mysql mariadb clickhouse mssql)
 
@@ -71,7 +74,11 @@ dsn_of() {
     mysql)      echo "MYSQL_DSN=root:${MY_PASSWORD}@tcp(127.0.0.1:${port})/gpool?parseTime=true" ;;
     mariadb)    echo "MARIADB_DSN=root:${MY_PASSWORD}@tcp(127.0.0.1:${port})/gpool?parseTime=true" ;;
     clickhouse) echo "CLICKHOUSE_DSN=clickhouse://default:${CH_PASSWORD}@127.0.0.1:${port}/gpool" ;;
-    mssql)      echo "MSSQL_DSN=sqlserver://sa:${MSSQL_PASSWORD}@127.0.0.1:${port}?database=master" ;;
+    mssql)
+      echo "MSSQL_DSN=sqlserver://sa:${MSSQL_PASSWORD}@127.0.0.1:${port}?database=master"
+      # CDC cannot be enabled on a system database, so its tests get their own.
+      echo "MSSQL_CDC_DSN=sqlserver://sa:${MSSQL_PASSWORD}@127.0.0.1:${port}?database=${MSSQL_CDC_DB}"
+      ;;
   esac
 }
 
@@ -120,6 +127,9 @@ start_engine() {
         "${image}" >/dev/null
       ;;
     mssql)
+      # The Agent is what runs the CDC capture job. Without it sp_cdc_enable_table
+      # succeeds, the change tables are created, and they stay empty forever.
+      #
       # Microsoft publishes SQL Server for amd64 only. On Apple silicon this
       # needs emulation, and whether that works is a property of the host rather
       # than of gpool — so a failure here is reported plainly instead of being
@@ -127,6 +137,7 @@ start_engine() {
       container run -d --rm --name "${name}" -p "${port}:1433" \
         --arch amd64 -m 4G -c 4 \
         -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD="${MSSQL_PASSWORD}" -e MSSQL_PID=Developer \
+        -e MSSQL_AGENT_ENABLED=true \
         "${image}" >/dev/null 2>&1 || {
           note "mssql: could not start (amd64 image on $(uname -m) host)"
           return 1
@@ -150,11 +161,28 @@ ready_engine() {
   esac >/dev/null 2>&1
 }
 
+# provision runs the one-off setup an engine needs after it is up.
+provision() {
+  [ "$1" = mssql ] || return 0
+
+  container exec "${PREFIX}-mssql" /opt/mssql-tools18/bin/sqlcmd -C \
+    -S localhost -U sa -P "${MSSQL_PASSWORD}" -Q "
+IF DB_ID('${MSSQL_CDC_DB}') IS NULL CREATE DATABASE ${MSSQL_CDC_DB};" >/dev/null 2>&1 || return 1
+
+  container exec "${PREFIX}-mssql" /opt/mssql-tools18/bin/sqlcmd -C \
+    -S localhost -U sa -P "${MSSQL_PASSWORD}" -d "${MSSQL_CDC_DB}" -Q "
+IF (SELECT is_cdc_enabled FROM sys.databases WHERE name = '${MSSQL_CDC_DB}') = 0
+  EXEC sys.sp_cdc_enable_db;" >/dev/null 2>&1 || return 1
+
+  note "mssql: ${MSSQL_CDC_DB} database created with CDC enabled"
+}
+
 wait_ready() {
   local engine="$1" tries="${2:-90}"
   for _ in $(seq 1 "${tries}"); do
     if ready_engine "${engine}"; then
       note "${engine}: ready"
+      provision "${engine}" || note "${engine}: provisioning failed"
       return 0
     fi
     if ! container ls 2>/dev/null | grep -q "^${PREFIX}-${engine} "; then
@@ -203,7 +231,11 @@ cmd_down() {
 cmd_env() {
   for engine in "${ALL_ENGINES[@]}"; do
     if ready_engine "${engine}"; then
-      echo "export ${1:-}$(dsn_of "${engine}")"
+      # An engine may declare more than one variable, so each line is exported
+      # rather than only the first.
+      dsn_of "${engine}" | while IFS= read -r setting; do
+        [ -n "${setting}" ] && echo "export ${setting}"
+      done
     fi
   done
 }

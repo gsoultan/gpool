@@ -1,8 +1,14 @@
 # CDC internals
 
-Two vendors now: `pkg/vendors/postgres/cdc` (pgoutput, proto_version 1) and
-`vendors/mysql/cdc` (binary log). See `mem:cdc_mysql` for the second one and for
-what having two proved about the shared interfaces.
+Three vendors now: `pkg/vendors/postgres/cdc` (pgoutput, proto_version 1),
+`vendors/mysql/cdc` (binary log), and `vendors/mssql/cdc` (change tables). See
+`mem:cdc_mysql` and `mem:cdc_mssql`.
+
+The third one is the one that mattered for the abstraction: PostgreSQL and MySQL
+both tail a log, so agreeing proved less than it looked. SQL Server polls a table
+the server fills on its own schedule, and `Position`, `SubscribeFrom` and the
+at-least-once contract all held without change — which is the evidence they are
+not shaped around log tailing.
 
 ## The shared surface, and what is deliberately not in it
 
@@ -13,6 +19,11 @@ subscription object at all, so a mandatory interface would have forced four
 methods that only return errors — a compile-time mismatch turned into a runtime
 one. PostgreSQL carries `var _ cdc.ReplicationManager = (*Postgres)(nil)`
 explicitly, because with it off `Subscriber` nothing else would catch dropping it.
+
+**`Event.Timestamp`** is the source's commit time, the same on every change from
+one transaction. PostgreSQL takes it from the Begin message, MySQL and SQL Server
+from the event and the LSN-to-time mapping. Resolution differs by vendor, so
+equal timestamps do not mean simultaneous.
 
 **`Event.Position` is an opaque `cdc.Position` string, not a number.** A WAL
 offset is the only change log position that fits in a uint64; MySQL's is a set of

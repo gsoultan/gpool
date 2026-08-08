@@ -18,6 +18,42 @@ the abstraction holds.
 
 ## [Unreleased]
 
+### Added
+
+- **SQL Server change data capture**, in `vendors/mssql/cdc`. It reads the change
+  tables `sys.sp_cdc_enable_table` populates, so `AddTables` is server-side DDL
+  rather than a client-side filter and `VerifyTable` can report what the server
+  is really capturing.
+
+  It lives inside the pool vendor's module rather than its own, because unlike
+  the MySQL binlog reader it needs no dependency the pool does not already have:
+  one driver serves both.
+
+  This is the third CDC vendor and the first that does not tail a log. Polling a
+  table is a different shape from following a stream, and it is what established
+  that `Position` generalises — an opaque marker was the right call, because
+  SQL Server's is a ten-byte LSN rendered `0x0000002B00000582001C`, which fits
+  neither a WAL offset nor a GTID set.
+
+- **`Event.Timestamp`** carries the source's commit time on every change. Both
+  existing vendors already reported it and both were discarding it: pgoutput
+  sends it once in the Begin that opens a transaction, and every MySQL binlog
+  event header is stamped. Adding a struct field breaks no consumer.
+
+### Fixed
+
+- **`SetMaxConns` published its two ceilings without serialising them.** The
+  value `reserveSlot` checks before dialling and the permit set that bounds
+  checkouts were separate writes, and `take()` reasons across both — a caller
+  holding a permit implies room below the ceiling, which is why it yields and
+  retries rather than dialling past it. Two callers resizing at once could leave
+  the pair disagreeing permanently, at which point surplus permit holders spin
+  in that retry loop against a ceiling that never admits them.
+
+  The window is two instructions wide, and five thousand paired-resize trials
+  never hit it; the defect was found by reading the invariant `take()` documents
+  and checking whether anything enforced it.
+
 ## [0.4.0] - 2026-08-07
 
 > **Upgrading from v0.3.0.** One breaking change: `gpool.Stat` gained
