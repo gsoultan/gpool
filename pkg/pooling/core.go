@@ -74,6 +74,16 @@ type Core[C any] struct {
 	emptyAcquireCount    atomic.Int64
 	canceledAcquireCount atomic.Int64
 
+	// resizeMu serialises SetMaxConns. The ceiling and the permit set are two
+	// separate publications, and take() reasons across both: a caller holding a
+	// permit implies fewer than MaxConns others hold one, so it may yield and
+	// retry rather than dial above the ceiling. Two callers resizing at once
+	// could interleave their publications and leave the pair disagreeing
+	// permanently, at which point the surplus permit holders spin in that retry
+	// loop against a ceiling that will never admit them. The window is two
+	// instructions wide, which makes it rare rather than impossible.
+	resizeMu sync.Mutex
+
 	closed    atomic.Bool
 	closeOnce sync.Once
 	bgCtx     context.Context
@@ -148,12 +158,19 @@ func (c *Core[C]) SetMaxConns(n int32) error {
 			ErrInvalidConfig, n, c.config.MaxConnsLimit)
 	}
 
-	// Order matters: publish the ceiling before moving the permits, so a caller
-	// that wins a freshly handed-out permit cannot then pass a stale check in
+	// Serialised so the ceiling and the permit set move as one. Within that,
+	// order still matters: publish the ceiling before handing out permits, so a
+	// caller that wins a fresh permit cannot then pass a stale check in
 	// reserveSlot and dial above the new ceiling.
+	//
+	// trimIdle stays inside the lock even though it closes connections. It
+	// compares against the target it was given, so running it against a ceiling
+	// another caller has already moved would trim to the wrong number.
+	c.resizeMu.Lock()
+	defer c.resizeMu.Unlock()
+
 	c.maxConns.Store(n)
 	c.permits.resize(n)
-
 	c.trimIdle(n)
 	return nil
 }
