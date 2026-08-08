@@ -18,6 +18,30 @@ the abstraction holds.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-08
+
+> **Upgrading from v0.4.0.** Nothing breaks. `Event` gained a field, which no
+> consumer implements, and everything else is additive or internal. This is
+> deliberately a quiet release: the versioning policy below asks for a cycle
+> without a breaking change before `v1.0.0`, and this is it.
+
+### Frozen for v1.0.0
+
+Two design decisions have been reviewed repeatedly and are now settled, so that
+`v1.0.0` does not arrive with them still open:
+
+- **The vendor factory keeps `config any`.** A mismatched config type is a
+  runtime error rather than a compile error. Making it generic would push the
+  vendor's config type into every signature that touches a pool, for a mistake
+  that surfaces on the first line of `main`. `database/sql` made the same
+  trade.
+- **PostgreSQL CDC keeps delivering values as `string`.** That is exactly how
+  `pgoutput` transmits them, and the replication stream does not carry the
+  destination Go type — so anything else would be this library guessing. MySQL
+  and SQL Server deliver their drivers' native types for the same reason: what
+  the protocol gives, unmodified. The difference is documented rather than
+  smoothed over.
+
 ### Added
 
 - **SQL Server change data capture**, in `vendors/mssql/cdc`. It reads the change
@@ -369,7 +393,8 @@ test whose comment records the original failure mode.
 - PostgreSQL is the only vendor. The abstraction has not yet been proven against a
   second one.
 
-[Unreleased]: https://github.com/gsoultan/gpool/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/gsoultan/gpool/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/gsoultan/gpool/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gsoultan/gpool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gsoultan/gpool/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/gsoultan/gpool/releases/tag/v0.1.0
