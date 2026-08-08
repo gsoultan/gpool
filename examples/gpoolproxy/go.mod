@@ -3,7 +3,7 @@ module github.com/gsoultan/gpool/examples/gpoolproxy
 go 1.26.5
 
 require (
-	github.com/gsoultan/gpool v0.3.0
+	github.com/gsoultan/gpool v1.0.0
 	github.com/jackc/pgx/v5 v5.10.0
 )
 

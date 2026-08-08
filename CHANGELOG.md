@@ -7,16 +7,51 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Versioning policy
 
-While the major version is `0`, the API may change in a minor release. `v0.x` means
-the library is in production use but its surface is not yet frozen — pin an exact
-version. Breaking changes are always listed under **Changed** or **Removed** with the
+From `v1.0.0` the exported surface of `pkg/gpool`, `pkg/gpool/cdc`, `pkg/pooling`
+and `pkg/sqldriver` is stable. A breaking change to any of them means `v2`, with
+the module path change Go requires, not a minor release.
+
+What that promise does *not* cover, deliberately:
+
+- **Adding a field to a struct, or a value to `Op`.** `Event` has grown twice and
+  will again. Consumers read it; nothing implements it.
+- **A new optional capability interface.** `BulkCopier`, `Batcher`, `Notifier`,
+  `Resizable` and `ReplicationManager` are reached by type assertion precisely so
+  that adding one breaks nobody.
+- **Vendor `Config` structs**, which gain fields as their engines do.
+- **`examples/`**, which is not part of the library.
+
+Breaking changes are always listed under **Changed** or **Removed** with the
 reason and the migration.
 
-`v1.0.0` will be tagged once the interfaces in `pkg/gpool` and `pkg/gpool/cdc` have
-gone a release cycle without a breaking change, and a second vendor exists to prove
-the abstraction holds.
-
 ## [Unreleased]
+
+## [1.0.0] - 2026-08-08
+
+The API is frozen. Everything in `pkg/gpool`, `pkg/gpool/cdc`, `pkg/pooling` and
+`pkg/sqldriver` is now covered by the versioning policy above.
+
+> **Upgrading from v0.5.0.** Nothing breaks. `Event` gained `Transaction`, which
+> no consumer implements.
+
+What the freeze rests on, since a version number is a claim and this one should
+be checkable:
+
+- **Three CDC vendors, one of which is not a log tail.** PostgreSQL and MySQL
+  both follow a stream; SQL Server polls change tables the server fills on its
+  own schedule. `Position`, `SubscribeFrom`, `Transaction` and the at-least-once
+  contract carry across all three unchanged. Two vendors agreeing proved less
+  than it looked, because the interfaces were designed while looking at exactly
+  those two.
+- **Five engines and a wire-protocol proxy on one pooling engine.** `pkg/pooling`
+  is driven by pgx, by three `database/sql` drivers, and by a PostgreSQL proxy
+  whose connection type is a socket and a transaction status rather than a
+  database driver at all.
+- **Every vendor exercised against a real server**, at the versions recorded in
+  the README. Two of them — MariaDB and SQL Server — were documented as supported
+  for weeks while never having been run, which is the reason that table now names
+  versions rather than ticking boxes.
+
 
 ### Added
 
@@ -421,7 +456,8 @@ test whose comment records the original failure mode.
 - PostgreSQL is the only vendor. The abstraction has not yet been proven against a
   second one.
 
-[Unreleased]: https://github.com/gsoultan/gpool/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/gsoultan/gpool/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/gsoultan/gpool/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/gsoultan/gpool/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gsoultan/gpool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gsoultan/gpool/compare/v0.1.0...v0.3.0

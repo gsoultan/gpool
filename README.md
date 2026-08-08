@@ -7,7 +7,7 @@ is no daemon, no CLI, no config file, no logger, and no process-global state.
 ## 📦 Installation
 
 ```bash
-go get github.com/gsoultan/gpool@v0.2.0
+go get github.com/gsoultan/gpool@v1.0.0
 ```
 
 While the major version is `0` the API may change in a minor release, so pin an
