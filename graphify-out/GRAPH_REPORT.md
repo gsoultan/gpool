@@ -1,163 +1,160 @@
-# Graph Report - .  (2026-08-06)
+# Graph Report - .  (2026-08-08)
 
 ## Corpus Check
-- 159 files · ~103,042 words
+- 175 files · ~123,039 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1751 nodes · 3783 edges · 81 communities (71 shown, 10 thin omitted)
-- Extraction: 89% EXTRACTED · 11% INFERRED · 0% AMBIGUOUS · INFERRED: 404 edges (avg confidence: 0.82)
-- Token cost: 116,430 input · 0 output
+- 2040 nodes · 4601 edges · 78 communities (68 shown, 10 thin omitted)
+- Extraction: 86% EXTRACTED · 14% INFERRED · 0% AMBIGUOUS · INFERRED: 625 edges (avg confidence: 0.85)
+- Token cost: 192,391 input · 0 output
 
 ## Community Hubs (Navigation)
-- Pooling Engine Core
-- Comparative Pool Benchmarks
 - PostgreSQL CDC Subscriber
+- SQL Server CDC Stream
 - PostgreSQL Replication Stream
-- database/sql Transactions
-- database/sql Connection Wrapper
-- PostgreSQL Batch and Copy
+- Pooling Engine Core
 - database/sql Row Scanning
+- Pooling Core Tests
+- gpool Pool Benchmarks
+- PostgreSQL Batch and Copy
 - Engine and CDC Interfaces
 - Bulk Copy Capability Tests
-- gpool Pool Benchmarks
-- Module Dependency Graph
-- CDC Integration Tests
-- SQL Server Vendor
-- Project Invariants
-- CDC Design History
-- PostgreSQL Pool Interfaces
-- Scale and Footprint Notes
-- Vendor Module Boundaries
-- MySQL CDC Position Rules
-- Proxy Server Lifecycle
-- ClickHouse Vendor
-- Pooling Configuration
-- Pool Release Gate Notes
-- MySQL CDC Subscriber
-- Proxy Session Startup
-- MySQL Pool Vendor
-- Vendor Factory Registry
-- gpool Interface Fakes
-- MySQL CDC Integration Tests
-- Proxy Module Structure
-- Library-Only Project Shape
-- Proxy Backend Connection
-- MySQL CDC Dependencies
-- Benchmark and Network Rules
-- MySQL Binlog Stream
-- Permit Token Channel
-- PostgreSQL Row Results
-- PostgreSQL Pool Construction
-- PostgreSQL Row Tests
-- Multi-Database Registry Notes
-- Interface Segregation Notes
-- PostgreSQL Transaction Tests
-- PostgreSQL Rows Iterator
-- PostgreSQL Connection Driver
-- PostgreSQL Connection Handle
-- MySQL Column Name Resolution
+- Comparative Pool Benchmarks
+- Project History and Plans
 - Junie Workflow Rules
-- MySQL Table Filter
-- PostgreSQL Pool Facade
-- Junie Architecture Rules
+- gpool Interface Fakes
+- Module Dependency Graph
+- PostgreSQL Pool Construction
+- PostgreSQL Pool Interfaces
+- CDC Internals Notes
+- Proxy and PgBouncer Notes
+- Project Invariants
+- CDC Integration Tests
+- database/sql Pool Tests
+- SQL Server CDC Notes
+- Proxy SCRAM Authentication
+- SQL Server Vendor
+- Pooling Configuration
+- Pool Internals Notes
+- Proxy Server Lifecycle
+- database/sql Connection Wrapper
+- Proxy Session Startup
+- MySQL CDC Dependencies
+- MySQL Pool Vendor
+- database/sql Transactions
+- Scale and Footprint Notes
+- MySQL CDC Subscriber
+- Proxy Backend Connection
+- MySQL CDC Integration Tests
+- CDC Position Semantics
+- Test Database Script
+- MySQL Binlog Stream
+- PostgreSQL Row Results
+- Permit Token Channel
+- PostgreSQL Row Tests
+- Hardening and Teardown Notes
+- Proxy Integration Tests
+- Proxy Command Line
+- Benchmark Hygiene Notes
+- Proxy Prepared Statements
+- Allocation and Goroutine Budget
+- PostgreSQL Rows Iterator
+- PostgreSQL Transaction Tests
+- MySQL Column Resolution
+- ClickHouse Vendor
+- Proxy Module Structure
 - Proxy Message Relay
-- PostgreSQL LISTEN/NOTIFY
+- Vendor Behaviour Notes
+- MySQL Table Filter
 - Pooling Statistics
+- database/sql Conn Wrapper
 - database/sql Tx Wrapper
-- Software Architect Profile
+- PostgreSQL Connection Handle
 - MySQL Position Tracking
+- PostgreSQL CDC Config
 - database/sql Result
 - PostgreSQL Config Tests
 - MySQL Position Unit Tests
-- Junie Coding Guidelines
-- PgBouncer Comparison Findings
 - PostgreSQL Pool Config
-- Proxy Throughput Benchmark
-- Proxy Connection Helpers
 - Graph Reconcile Script
 - MySQL Syncer Configuration
-- PostgreSQL CDC Config
 - Pool Statistics Interfaces
 - PostgreSQL Command Result
-- PostgreSQL Single Row
-- Proxy Credential Handling
 - MySQL CDC Config
-- MySQL Pool Config
-- Pooling Connection Handle
+- Proxy Credential Files
 - database/sql Pool Config
 - PostgreSQL Deferred Error Row
-- Proxy Socket Takeover
 - MySQL Schema Mismatch
-- Replication Slot Per Node
-- File Naming Convention
+- Runtime Capacity Control
+- Native Vendor Note
 
 ## God Nodes (most connected - your core abstractions)
-1. `session` - 35 edges
-2. `newPool()` - 31 edges
-3. `Proxy` - 30 edges
-4. `Postgres` - 27 edges
-5. `pgEventStream` - 25 edges
-6. `MySQL` - 25 edges
-7. `Rows` - 24 edges
-8. `Conn` - 23 edges
-9. `NewPool()` - 22 edges
-10. `assign()` - 22 edges
+1. `gpool - Agent & Developer Profiles` - 52 edges
+2. `Gpool: A Go Connection Pooling & CDC Library` - 44 edges
+3. `session` - 40 edges
+4. `newPool()` - 31 edges
+5. `Proxy` - 30 edges
+6. `newTestCore()` - 30 edges
+7. `Pool Internals` - 29 edges
+8. `Postgres` - 27 edges
+9. `gpoolproxy - Cross-Application Pooling` - 26 edges
+10. `Rows` - 25 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `CLAUDE.md gpool Quick Reference` --semantically_similar_to--> `Library Only, Never an Application`  [INFERRED] [semantically similar]
-  CLAUDE.md → AGENTS.md
-- `Bound What Multiplies` --semantically_similar_to--> `Profile: Security Architect`  [INFERRED] [semantically similar]
-  .serena/memories/scale.md → AGENTS.md
-- `Serena Persistent Memory` --references--> `Gpool Core Memory`  [INFERRED]
-  .junie/agents.md → .serena/memories/core.md
-- `CLI Proxy Mode` --conceptually_related_to--> `gpool: a Go connection pooling and CDC library`  [AMBIGUOUS]
+- `Changed: Per-Connection Memory Cut Roughly 60%` --semantically_similar_to--> `Per-Connection Caches Are the Memory Cost`  [INFERRED] [semantically similar]
+  CHANGELOG.md → .serena/memories/pool.md
+- `CLI Proxy Mode` --conceptually_related_to--> `Gpool: A Go Connection Pooling & CDC Library`  [AMBIGUOUS]
   .junie/plans/gpool-lib-init.md → README.md
-- `Clone the GTID set: BinlogSyncer retains and mutates it` --semantically_similar_to--> `Event shape: Op, Schema, Table, Position, Before, After`  [INFERRED] [semantically similar]
-  .serena/memories/cdc_mysql.md → README.md
+- `Post-Task Knowledge Update` --semantically_similar_to--> `Post-Task Maintenance Order`  [INFERRED] [semantically similar]
+  .junie/agents.md → AGENTS.md
+- `Post-Task Cleanup and Knowledge Update` --semantically_similar_to--> `Post-Task Maintenance Order`  [INFERRED] [semantically similar]
+  .junie/guidelines.md → AGENTS.md
+- `Changed: cdc.ReplicationManager Left cdc.Subscriber` --semantically_similar_to--> `ReplicationManager Is Optional, Reached by Type Assertion`  [INFERRED] [semantically similar]
+  CHANGELOG.md → .serena/memories/cdc.md
 
 ## Import Cycles
 - None detected.
 
 ## Hyperedges (group relationships)
 - **Token Channel Permit Set Replacing the Counting Semaphore** — _serena_memories_scale_semaphore_weighted_bottleneck, _serena_memories_scale_token_channel_permits, _serena_memories_pool_permits, _junie_plans_gpool_lib_init_token_channel_replacement, _serena_memories_scale_dropped_x_sync [INFERRED 0.85]
-- **The CDC surface proven against two vendors** — _serena_memories_cdc_subscriber, _serena_memories_cdc_replicationmanager, _serena_memories_cdc_subscribefrom, _serena_memories_cdc_event_position, _serena_memories_cdc_mysql_module, _serena_memories_cdc_errnocdcsupport [EXTRACTED 1.00]
-- **The release gate: what a caller must not leave behind** — _serena_memories_pool_recyclable, _serena_memories_pool_transaction_gate, _serena_memories_pool_listen_state, _serena_memories_pool_resetquery, _serena_memories_pool_needscleanup, readme_release_gate, _serena_memories_vendors_transaction_gate [INFERRED 0.85]
-- **Transaction-mode backend handover in gpoolproxy** — _serena_memories_proxy_pump, _serena_memories_proxy_relay, _serena_memories_proxy_pending, _serena_memories_proxy_session_mutex, _serena_memories_proxy_message_relay [EXTRACTED 1.00]
+- **Opaque Position: the Contract Three Unlike Change Logs Share** — _serena_memories_cdc_event_position, _serena_memories_cdc_third_vendor_proof, _serena_memories_cdc_mssql_not_a_log_tail, _serena_memories_cdc_resume_contract, changelog_event_position_change, readme_positions_and_resuming [INFERRED 0.85]
+- **The Release Gate Is What Makes Reuse Safe** — _serena_memories_pool_recyclable, _serena_memories_pool_transaction_gate, _serena_memories_pool_listen_gate, _serena_memories_proxy_release_condition, readme_release_gate, agents_pooling_contract [INFERRED 0.85]
+- **Cross-Application Pooling Needs a Process, and Proves the Engine Is Vendor-Agnostic** — _serena_memories_proxy_cross_application_bound, _serena_memories_proxy_generality_proof, examples_gpoolproxy_readme_vendor_agnostic_proof, readme_cross_application_pooling, changelog_pkg_pooling_added, _serena_memories_architecture_gpoolproxy [INFERRED 0.85]
 
-## Communities (81 total, 10 thin omitted)
+## Communities (78 total, 10 thin omitted)
 
-### Community 0 - "Pooling Engine Core"
-Cohesion: 0.05
-Nodes (50): Int64, Time, newCoarseClock(), Bool, C, CancelFunc, Config, Context (+42 more)
-
-### Community 1 - "Comparative Pool Benchmarks"
-Cohesion: 0.06
-Nodes (64): BenchmarkPgBouncer(), BenchmarkPgxPool(), BenchmarkPgxPoolStress(), BenchmarkStdlib(), BenchmarkStdlibStress(), B, Config, hash() (+56 more)
-
-### Community 2 - "PostgreSQL CDC Subscriber"
-Cohesion: 0.08
-Nodes (47): Postgres, slices, firstErr(), Config, T, longSlotName(), TestClosedSubscriberRefusesWork(), TestConfigDefaults() (+39 more)
-
-### Community 3 - "PostgreSQL Replication Stream"
-Cohesion: 0.05
-Nodes (49): BackendMessage, Event, Op, pendingEvent, pgEventStream, DeleteMessage, EventType, fakeStream (+41 more)
-
-### Community 4 - "database/sql Transactions"
-Cohesion: 0.06
-Nodes (36): Tx, Bool, Context, Int32, NamedValue, Stmt, Value, Config (+28 more)
-
-### Community 5 - "database/sql Connection Wrapper"
+### Community 0 - "PostgreSQL CDC Subscriber"
 Cohesion: 0.07
-Nodes (19): pgRows, Context, Stmt, Context, newConnWrapper(), Connector, connWrapper, Context (+11 more)
+Nodes (52): Postgres, math, firstErr(), Config, T, longSlotName(), TestClosedSubscriberRefusesWork(), TestConfigDefaults() (+44 more)
 
-### Community 6 - "PostgreSQL Batch and Copy"
+### Community 1 - "SQL Server CDC Stream"
+Cohesion: 0.06
+Nodes (43): captureInstance, change, sqlEventStream, SQLServer, Config, Duration, asInt(), describe() (+35 more)
+
+### Community 2 - "PostgreSQL Replication Stream"
+Cohesion: 0.05
+Nodes (51): BackendMessage, Event, Op, pendingEvent, pgEventStream, DeleteMessage, fakeStream, InsertMessage (+43 more)
+
+### Community 3 - "Pooling Engine Core"
+Cohesion: 0.05
+Nodes (31): Int64, Time, newCoarseClock(), Bool, C, CancelFunc, Config, Context (+23 more)
+
+### Community 4 - "database/sql Row Scanning"
+Cohesion: 0.06
+Nodes (49): reflect, pgRows, errArity(), Bool, newRow(), Bool, connWrapper, Seq (+41 more)
+
+### Community 5 - "Pooling Core Tests"
+Cohesion: 0.09
+Nodes (50): New(), Bool, Config, Context, Int32, Mutex, T, newTestCore() (+42 more)
+
+### Community 6 - "gpool Pool Benchmarks"
+Cohesion: 0.08
+Nodes (49): BenchmarkGpoolAcquireRelease(), BenchmarkGpoolQueryIterator(), BenchmarkGpoolQueryRow(), BenchmarkGpoolQueryRowStress(), BenchmarkGpoolResetQuery(), B, Config, Pool (+41 more)
+
+### Community 7 - "PostgreSQL Batch and Copy"
 Cohesion: 0.05
 Nodes (23): CopyFromSource, FieldDescription, Batch, BatchQuery, BatchResults, Identifier, LargeObjects, T (+15 more)
-
-### Community 7 - "database/sql Row Scanning"
-Cohesion: 0.08
-Nodes (43): reflect, errArity(), Bool, connWrapper, Seq, Value, newRows(), scanInto() (+35 more)
 
 ### Community 8 - "Engine and CDC Interfaces"
 Cohesion: 0.08
@@ -167,275 +164,265 @@ Nodes (36): Stream, Subscriber, TableManager, net/url, Engine, databaseNamed(), 
 Cohesion: 0.09
 Nodes (40): BulkCopier, CopyRequest, CopyRows, sliceRows, Pool, T, scratchTable(), TestCopyFromLoadsRows() (+32 more)
 
-### Community 10 - "gpool Pool Benchmarks"
+### Community 10 - "Comparative Pool Benchmarks"
 Cohesion: 0.09
-Nodes (43): BenchmarkGpoolAcquireRelease(), BenchmarkGpoolQueryIterator(), BenchmarkGpoolQueryRow(), BenchmarkGpoolQueryRowStress(), BenchmarkGpoolResetQuery(), B, Config, Pool (+35 more)
+Nodes (43): BenchmarkPgBouncer(), BenchmarkPgxPool(), BenchmarkPgxPoolStress(), BenchmarkStdlib(), BenchmarkStdlibStress(), B, benchmarkTarget(), BenchmarkThroughput() (+35 more)
 
-### Community 11 - "Module Dependency Graph"
+### Community 11 - "Project History and Plans"
+Cohesion: 0.06
+Nodes (47): Avoid Stuttering in Filenames and Symbols, The /internal Rule Is Inverted for gpool, Integrated CDC via Logical Replication, Gpool Library Initialization Plan, Go 1.26 Iterator API, Multi-Database Engine Pool Registry, Step 10: Multi-Database Support, Independent Replication Slot per Node (+39 more)
+
+### Community 12 - "Junie Workflow Rules"
+Cohesion: 0.06
+Nodes (46): No AI Co-Authorship Trailers, Mandatory Copyright Header, Modern Go 1.26 Syntax, Gpool Is a Library, Not a Service, Graphify Knowledge Graph, Gpool Project Guidelines (.junie), Hierarchical Discovery Before a Level 4 Full Read, Layered Architecture Pattern (+38 more)
+
+### Community 13 - "gpool Interface Fakes"
+Cohesion: 0.09
+Nodes (23): EventStream, github.com/gsoultan/gpool/vendors/mssql/cdc, fakePool, fakeSubscriber, Context, Int32, Stat, collect() (+15 more)
+
+### Community 14 - "Module Dependency Graph"
 Cohesion: 0.06
 Nodes (45): filippo/io/edwards25519, github.com/andybalholm/brotli, github.com/cespare/xxhash/v2, github.com/clickhouse/ch/go, github.com/clickhouse/clickhouse/go/v2, github.com/coreos/go/semver, github.com/go/faster/city, github.com/go/faster/errors (+37 more)
 
-### Community 12 - "CDC Integration Tests"
+### Community 15 - "PostgreSQL Pool Construction"
+Cohesion: 0.08
+Nodes (27): newConnWrapper(), closeConn(), Config, ConnConfig, Context, Pool, newFromConfig(), Config (+19 more)
+
+### Community 16 - "PostgreSQL Pool Interfaces"
+Cohesion: 0.10
+Nodes (11): ReplicationManager, context, database/sql/driver, github.com/gsoultan/gpool/pkg/gpool, github.com/gsoultan/gpool/pkg/pooling, github.com/jackc/pgx/v5, iter, sync/atomic (+3 more)
+
+### Community 17 - "CDC Internals Notes"
+Cohesion: 0.07
+Nodes (39): SQL Externalization to .sql + go:embed, Compile-Time Interface Proofs, catchUp Advances the Position on Idle Keepalives, CDC Internals, run Defer Order Is Load-Bearing, ErrNoCDCSupport, flushed Is confirmed_flush_lsn, Set After yield Returns, captureInstancePattern Validation (+31 more)
+
+### Community 18 - "Proxy and PgBouncer Notes"
+Cohesion: 0.08
+Nodes (37): PgBouncer Transaction Mode, PgBouncer Integration, examples/gpoolproxy as a Separate Module, emit Selects on the Keepalive Ticker, pgConn as a Type Parameter, Not an Interface, Cancellation Keys Are Per Session and Unguessable, A Library Cannot Bound Connections Across Applications, s.expect Swallows the Injected ParseComplete (+29 more)
+
+### Community 19 - "Project Invariants"
+Cohesion: 0.07
+Nodes (37): Control and Replication Connections, Never Shared, Every Drain Is Bounded, Validate and Default Config at Construction, Confirm Only After the Work Is Done, Caller-Owned Maps and Slices Allocated Fresh, No Callback Invoked Under Its Own Lock, No Panic Reaches the Caller, Invariants (Memory) (+29 more)
+
+### Community 20 - "CDC Integration Tests"
 Cohesion: 0.15
 Nodes (32): github.com/gsoultan/gpool/pkg/vendors/postgres/cdc, collect(), emailsOf(), Config, Duration, Pool, T, newCDCFixture() (+24 more)
 
-### Community 13 - "SQL Server Vendor"
+### Community 21 - "database/sql Pool Tests"
+Cohesion: 0.12
+Nodes (27): Int32, Value, Config, New(), Config, Pool, T, newTestPool() (+19 more)
+
+### Community 22 - "SQL Server CDC Notes"
+Cohesion: 0.07
+Nodes (35): vendors/mssql/cdc: a Package Inside the Pool Vendor's Module, Event.Timestamp Is the Source's Commit Time, AddTables Is Real DDL, Capture Mode 'all update old', Not 'all', Latency Is the Capture Job's, About Five Seconds, SQL Server CDC - Change Tables, A Package Inside the Pool Vendor's Module, Metadata Columns Recognised by Their __$ Prefix (+27 more)
+
+### Community 23 - "Proxy SCRAM Authentication"
+Cohesion: 0.14
+Nodes (27): hash(), field(), splitGS2(), exchange(), T, parseServerFirst(), TestSCRAMAcceptsTheRightPassword(), TestSCRAMRejectsAlteredChannelBinding() (+19 more)
+
+### Community 24 - "SQL Server Vendor"
 Cohesion: 0.13
 Nodes (32): github.com/gsoultan/gpool/vendors/mssql, Config, dsn(), Config, Pool, T, newPool(), scratchTable() (+24 more)
 
-### Community 14 - "Project Invariants"
-Cohesion: 0.07
-Nodes (34): Every Drain Is Bounded, Validate and Default Config at Construction, Caller-Owned Maps and Slices Allocated Fresh, Idempotent Teardown, No Callback Invoked Under Its Own Lock, No Panic Reaches the Caller, Never Recycle Caller-Owned Objects, Invariants (Memory) (+26 more)
-
-### Community 15 - "CDC Design History"
-Cohesion: 0.07
-Nodes (32): CDC Control and Replication Connection Split, Integrated CDC via Logical Replication, Gpool Library Initialization Plan, Go 1.26 Iterator API, PgBouncer Replacement, Step 11: Production Hardening, Transaction-Mode Pooling Constraints, VendorFactory Pattern (+24 more)
-
-### Community 16 - "PostgreSQL Pool Interfaces"
-Cohesion: 0.12
-Nodes (8): ReplicationManager, context, database/sql/driver, github.com/gsoultan/gpool/pkg/gpool, github.com/gsoultan/gpool/pkg/pooling, github.com/jackc/pgx/v5, Batcher, Pool
-
-### Community 17 - "Scale and Footprint Notes"
-Cohesion: 0.09
-Nodes (29): Dropped golang.org/x/sync, Step 12: Scale and Footprint, Token Channel Replaces Counting Semaphore, Deliberately minimal dependencies (pgx/v5, pglogrepl), go-mysql logging discarded (gpool does no logging), permits: a token channel, not a counting semaphore, shard.count atomic mirror of len(conns), 16 cache-line-padded shards with randomised probe start (+21 more)
-
-### Community 18 - "Vendor Module Boundaries"
-Cohesion: 0.10
-Nodes (28): File and Folder Readability Limits, Nothing public under internal/, Interfaces in pkg/gpool, implementations in pkg/vendors, ErrNoCDCSupport, vendors/mysql/cdc: binary log CDC as a nested module, ServerID is required and must be unique, TestMySQLCDCOffersNoReplicationManager, ReplicationManager as optional capability (+20 more)
-
-### Community 19 - "MySQL CDC Position Rules"
+### Community 25 - "Pooling Configuration"
 Cohesion: 0.08
-Nodes (28): checkResumable guards against rewinding behind the slot, ErrPositionBehindSlot, Event.Position is an opaque cdc.Position string, Clone the GTID set: BinlogSyncer retains and mutates it, MySQL values keep the binlog parser's native Go types, resume advances only at commit (XID or literal COMMIT), SHOW BINARY LOG STATUS replaces SHOW MASTER STATUS in 8.4, Tagged positions: gtid:<set> or file:<name>:<offset> (+20 more)
+Nodes (11): errors, github.com/microsoft/go/mssqldb, math/rand/v2, runtime, time, Config, Config, Duration (+3 more)
 
-### Community 20 - "Proxy Server Lifecycle"
-Cohesion: 0.10
-Nodes (16): Addr, clientTLS(), Bool, CancelFunc, Config, Context, Mutex, Stat (+8 more)
+### Community 26 - "Pool Internals Notes"
+Cohesion: 0.08
+Nodes (30): SQL Server Agent Must Be Running, ActiveConnections Is an Exact Count, EvictIdle, LISTEN Is Session State the Transaction Gate Cannot See, Only the Blocking Path Is Timed, Pool Internals, recyclable(): the Release Gate, Core.SetMaxConns and gpool.Resizable (+22 more)
 
-### Community 21 - "ClickHouse Vendor"
-Cohesion: 0.15
-Nodes (25): Config, github.com/gsoultan/gpool/vendors/clickhouse, Options, Connector, Duration, Pool, New(), newFromConfig() (+17 more)
-
-### Community 22 - "Pooling Configuration"
+### Community 27 - "Proxy Server Lifecycle"
 Cohesion: 0.09
-Nodes (10): errors, github.com/clickhouse/clickhouse/go/v2, github.com/gsoultan/gpool/pkg/sqldriver, github.com/microsoft/go/mssqldb, math/rand/v2, runtime, time, Config (+2 more)
+Nodes (17): Addr, clientTLS(), Bool, CancelFunc, Config, Context, Mutex, Stat (+9 more)
 
-### Community 23 - "Pool Release Gate Notes"
-Cohesion: 0.09
-Nodes (25): Bounded Statement and Description Caches, Per-connection pgx caches bounded at 64, Driver.NeedsCleanup keeps release cheap, pgRow wraps pgx.Rows, not pgx.Row, Pooling mode is usage, not config, recyclable(): the ordered release gate, ResetQuery couples to query exec mode, Rows/Row ownership depends on the call level (+17 more)
+### Community 28 - "database/sql Connection Wrapper"
+Cohesion: 0.11
+Nodes (11): Context, Stmt, newConnWrapper(), Connector, connWrapper, Context, Stat, translate() (+3 more)
 
-### Community 24 - "MySQL CDC Subscriber"
-Cohesion: 0.17
-Nodes (8): MySQL, Position, BinlogStreamer, BinlogSyncer, Context, DB, GTIDSet, Mutex
-
-### Community 25 - "Proxy Session Startup"
-Cohesion: 0.15
+### Community 29 - "Proxy Session Startup"
+Cohesion: 0.13
 Nodes (9): newRelay(), cutCString(), CancelFunc, Context, Mutex, Reader, Writer, parameterOf() (+1 more)
 
-### Community 26 - "MySQL Pool Vendor"
-Cohesion: 0.19
-Nodes (24): github.com/gsoultan/gpool/vendors/mysql, Pool, newFromConfig(), dsn(), Config, Pool, T, newPool() (+16 more)
-
-### Community 27 - "Vendor Factory Registry"
-Cohesion: 0.20
-Nodes (23): PoolFactory, SubscriberFactory, Vendor, Pool, NewPool(), NewSubscriber(), RegisterPool(), RegisterSubscriber() (+15 more)
-
-### Community 28 - "gpool Interface Fakes"
-Cohesion: 0.13
-Nodes (6): EventStream, fakePool, fakeSubscriber, Context, Int32, Stat
-
-### Community 29 - "MySQL CDC Integration Tests"
-Cohesion: 0.29
-Nodes (18): fixture, github.com/gsoultan/gpool/vendors/mysql/cdc, collect(), dsn(), Config, DB, Duration, T (+10 more)
-
-### Community 30 - "Proxy Module Structure"
-Cohesion: 0.17
-Nodes (10): bufio, crypto/tls, encoding/binary, github.com/jackc/pgx/v5/pgconn, github.com/jackc/pgx/v5/pgproto3, io, iter, net (+2 more)
-
-### Community 31 - "Library-Only Project Shape"
-Cohesion: 0.11
-Nodes (21): AGENTS.md Wins Over These Guidelines, Project Shape: Gpool Is a Library, CLI Proxy Mode, Step 4: Wire Proxy and CLI Removed, Gpool Core Memory, Library-Only Go Module, Serena Memory Index, Module Path github.com/gsoultan/gpool (+13 more)
-
-### Community 32 - "Proxy Backend Connection"
-Cohesion: 0.15
-Nodes (10): Bool, Context, Reader, Writer, Config, Context, networkAddress(), backend (+2 more)
-
-### Community 33 - "MySQL CDC Dependencies"
-Cohesion: 0.18
-Nodes (10): fmt, github.com/go/mysql/org/go/mysql/mysql, github.com/go/mysql/org/go/mysql/replication, github.com/go/sql/driver/mysql, github.com/gsoultan/gpool/pkg/gpool/cdc, github.com/jackc/pglogrepl, log/slog, strconv (+2 more)
-
-### Community 34 - "Benchmark and Network Rules"
-Cohesion: 0.11
-Nodes (20): Close drains by acquiring all permits with closeDrainTimeout, maintain: the one background goroutine, Match Capacity on Both Sides, Two Readings of 5000 Connections, A Benchmark Comparison Must Match Capacity on Both Sides, Iteration Count Changes What a Benchmark Reports, Bound Connection Lifetime for Failover Recovery, Every Network Operation Is Bounded (+12 more)
-
-### Community 35 - "MySQL Binlog Stream"
+### Community 30 - "MySQL CDC Dependencies"
 Cohesion: 0.16
-Nodes (12): BinlogEvent, mysqlEventStream, BinlogStreamer, BinlogSyncer, Bool, CancelFunc, Context, Mutex (+4 more)
+Nodes (12): database/sql, encoding/hex, fmt, github.com/go/mysql/org/go/mysql/mysql, github.com/go/mysql/org/go/mysql/replication, github.com/go/sql/driver/mysql, github.com/gsoultan/gpool/pkg/gpool/cdc, github.com/jackc/pglogrepl (+4 more)
 
-### Community 36 - "Permit Token Channel"
+### Community 31 - "MySQL Pool Vendor"
 Cohesion: 0.21
-Nodes (10): Context, newPermits(), T, TestPermitsAcquireHonoursCancellation(), TestPermitsBoundConcurrency(), TestPermitsDrain(), TestPermitsFastPathDoesNotAllocate(), TestPermitsHoldTheBoundUnderContention() (+2 more)
+Nodes (26): github.com/gsoultan/gpool/vendors/mysql, target, Pool, newFromConfig(), eachTarget(), Config, Pool, T (+18 more)
 
-### Community 37 - "PostgreSQL Row Results"
+### Community 32 - "database/sql Transactions"
+Cohesion: 0.11
+Nodes (9): Tx, Bool, Context, NamedValue, Stmt, bareConn, fakeDriverConn, fakeTx (+1 more)
+
+### Community 33 - "Scale and Footprint Notes"
+Cohesion: 0.12
+Nodes (26): Bounded Statement and Description Caches, Dropped golang.org/x/sync, Step 12: Scale and Footprint, Token Channel Replaces Counting Semaphore, Minimal Dependencies: pgx/v5 and pglogrepl, go-mysql logging discarded (gpool does no logging), Per-Connection Caches Are the Memory Cost, Token Channel, Not a Counting Semaphore (+18 more)
+
+### Community 34 - "MySQL CDC Subscriber"
 Cohesion: 0.16
-Nodes (7): Row, Rows, Bool, closeRows(), batchResults, failedBatchResults, rowCursor
+Nodes (9): MySQL, Position, BinlogStreamer, BinlogSyncer, Context, DB, GTIDSet, Mutex (+1 more)
 
-### Community 38 - "PostgreSQL Pool Construction"
-Cohesion: 0.22
-Nodes (16): Pool, newFromConfig(), Config, New(), Config, T, newTestPool(), TestAcquireAfterCloseFailsFast() (+8 more)
+### Community 35 - "Proxy Backend Connection"
+Cohesion: 0.12
+Nodes (11): Bool, Context, Reader, Writer, Config, Context, networkAddress(), Conn (+3 more)
 
-### Community 39 - "PostgreSQL Row Tests"
-Cohesion: 0.27
-Nodes (15): newRow(), connWrapper, newRows(), T, TestErrorRowDefersTheError(), TestResultReportsRowsAffected(), TestRowReleaseWithoutScanClosesTheResultSet(), TestRowsAllClosesOnEarlyBreak() (+7 more)
+### Community 36 - "MySQL CDC Integration Tests"
+Cohesion: 0.30
+Nodes (20): target, github.com/gsoultan/gpool/vendors/mysql/cdc, collect(), eachTarget(), fixture, Config, DB, Duration (+12 more)
 
-### Community 40 - "Multi-Database Registry Notes"
+### Community 37 - "CDC Position Semantics"
+Cohesion: 0.10
+Nodes (22): vendors/mysql/cdc: Its Own Module Nested in the Pool Vendor, checkResumable and ErrPositionBehindSlot, Event.Position Is an Opaque String, Not a Number, checkRetained and ErrPositionExpired, Subscribe Starts at the End; SubscribeFrom Resumes Inclusively, Clone the GTID set: BinlogSyncer retains and mutates it, resume advances only at commit (XID or literal COMMIT), SHOW BINARY LOG STATUS replaces SHOW MASTER STATUS in 8.4 (+14 more)
+
+### Community 38 - "Test Database Script"
+Cohesion: 0.16
+Nodes (19): ALL_ENGINES, CH_PASSWORD, cmd_down(), cmd_env(), cmd_status(), cmd_up(), die(), dsn_of() (+11 more)
+
+### Community 39 - "MySQL Binlog Stream"
 Cohesion: 0.14
-Nodes (15): Testing Standards, Multi-Database Engine Pool Registry, Step 10: Multi-Database Support, Pool(name) Naming Decision, Engine: named registries of pools and subscribers, One pool per database, sharing nothing, CDC Fixtures Drop Their Slot, MaxConns: 1 as Leak Detector (+7 more)
+Nodes (14): BinlogEvent, mysqlEventStream, EventType, opOf(), BinlogStreamer, BinlogSyncer, Bool, CancelFunc (+6 more)
 
-### Community 41 - "Interface Segregation Notes"
+### Community 40 - "PostgreSQL Row Results"
+Cohesion: 0.14
+Nodes (8): Row, Rows, Bool, closeRows(), Context, batchResults, failedBatchResults, rowCursor
+
+### Community 41 - "Permit Token Channel"
+Cohesion: 0.17
+Nodes (11): Context, Int32, newPermits(), T, TestPermitsAcquireHonoursCancellation(), TestPermitsBoundConcurrency(), TestPermitsDrain(), TestPermitsFastPathDoesNotAllocate() (+3 more)
+
+### Community 42 - "PostgreSQL Row Tests"
+Cohesion: 0.19
+Nodes (17): Bool, connWrapper, newRow(), newRows(), T, TestErrorRowDefersTheError(), TestResultReportsRowsAffected(), TestRowReleaseWithoutScanClosesTheResultSet() (+9 more)
+
+### Community 43 - "Hardening and Teardown Notes"
+Cohesion: 0.14
+Nodes (20): sync.Pool Restricted to Non-Escaping Buffers, CDC Control and Replication Connection Split, Step 11: Production Hardening, Client-side table filter shared with the running stream, Table Management: Local List Updated Only After the Server Accepts, Idempotent Teardown, Never Recycle Caller-Owned Objects, Handle Is Returned by Value (+12 more)
+
+### Community 44 - "Proxy Integration Tests"
+Cohesion: 0.29
+Nodes (19): cachingURL(), connect(), Config, T, startProxy(), TestProxyBoundsBackendsAcrossIndependentClients(), TestProxyForgetsClosedStatements(), TestProxyIsolatesIdenticallyNamedStatements() (+11 more)
+
+### Community 45 - "Proxy Command Line"
+Cohesion: 0.14
+Nodes (12): Config, main(), parseFlags(), run(), flag, os/signal, syscall, Notification (+4 more)
+
+### Community 46 - "Benchmark Hygiene Notes"
+Cohesion: 0.15
+Nodes (17): Integration Tests Live in integration/, Not tests/, Interleave the Targets at Each Concurrency, Benchmark Hygiene, Match Capacity on Both Sides, 200k Iterations Before allocs/op Settles, AllocsPerRun Panics Under t.Parallel, Benchmark Hygiene, Test Layout (+9 more)
+
+### Community 47 - "Proxy Prepared Statements"
+Cohesion: 0.22
+Nodes (9): bindName(), closeStatement(), cString(), cutBytes(), parseName(), statementNameOf(), targetName(), bytes (+1 more)
+
+### Community 48 - "Allocation and Goroutine Budget"
 Cohesion: 0.16
-Nodes (15): Interface Segregation: interfaces of 7 methods or fewer, Control connection (ordinary pgconn.PgConn), Client-side table filter shared with the running stream, quoteQualifiedName splits on the first dot, Replication connection (replication=database), slotNamePattern validation, Local table list updated only after the server accepts, CDC cannot be pooled (+7 more)
+Nodes (15): Zero-Allocation Hot Paths, No Memory Leaks, Stream Topology: One run Goroutine, Buffered Delivery, maintain: the One Background Goroutine, Goroutine Cost Is One, Total, Allocation Is Cheap Next to a Network Round Trip, Cost Per Caller Must Be Zero, Every Goroutine Has a Named Owner and a Termination Path (+7 more)
 
-### Community 42 - "PostgreSQL Transaction Tests"
+### Community 49 - "PostgreSQL Rows Iterator"
+Cohesion: 0.15
+Nodes (5): Field, Bool, connWrapper, Seq, pgRows
+
+### Community 50 - "PostgreSQL Transaction Tests"
 Cohesion: 0.24
 Nodes (9): Bool, Context, newTx(), T, TestTxCommitWithDeferredRollback(), TestTxRefusesUseAfterSettle(), TestTxRollbackWithDeferredRollback(), TestTxSettlesExactlyOnce() (+1 more)
 
-### Community 43 - "PostgreSQL Rows Iterator"
-Cohesion: 0.16
-Nodes (4): Field, Bool, Seq, pgRows
-
-### Community 44 - "PostgreSQL Connection Driver"
-Cohesion: 0.30
-Nodes (6): closeConn(), Config, ConnConfig, Context, pgConn, pgxDriver
-
-### Community 45 - "PostgreSQL Connection Handle"
-Cohesion: 0.36
-Nodes (4): Context, connWrapper, newConnWrapper(), Handle
-
-### Community 46 - "MySQL Column Name Resolution"
-Cohesion: 0.27
+### Community 51 - "MySQL Column Resolution"
+Cohesion: 0.24
 Nodes (7): columns, TableMapEvent, Context, DB, Mutex, newColumns(), qualify()
 
-### Community 47 - "Junie Workflow Rules"
+### Community 52 - "ClickHouse Vendor"
+Cohesion: 0.21
+Nodes (10): Config, github.com/clickhouse/clickhouse/go/v2, github.com/gsoultan/gpool/pkg/sqldriver, Options, Connector, Duration, Pool, init() (+2 more)
+
+### Community 53 - "Proxy Module Structure"
+Cohesion: 0.32
+Nodes (7): bufio, crypto/tls, encoding/binary, github.com/jackc/pgx/v5/pgconn, github.com/jackc/pgx/v5/pgproto3, io, net
+
+### Community 54 - "Proxy Message Relay"
+Cohesion: 0.30
+Nodes (6): endsTransactionUnit(), flushIfDrained(), Reader, Writer, namesStatement(), relay
+
+### Community 55 - "Vendor Behaviour Notes"
 Cohesion: 0.20
-Nodes (11): Graphify Knowledge Graph, Mandatory Workflow Rules, Obsidian Agentic Second Brain, rtk Token Optimization, Serena Persistent Memory, Hierarchy of Reading (Levels 0-4), RTK - Rust Token Killer, sqz (Compression and Dedup) (+3 more)
+Nodes (11): MySQL values keep the binlog parser's native Go types, The Transaction Gate Is the Pooling Contract, ClickHouse: analytical column store, no general transactions, database/sql vendor: about a hundred lines, driver.Value is not a closed set, SQL Server: ordinal placeholders, lenient DSN parser, MySQL and MariaDB: one implementation, two names, pkg/sqldriver pools driver.Conn, not *sql.DB (+3 more)
 
-### Community 48 - "MySQL Table Filter"
+### Community 56 - "MySQL Table Filter"
 Cohesion: 0.27
-Nodes (4): filter, RWMutex, newFilter(), normalize()
+Nodes (5): filter, slices, RWMutex, newFilter(), normalize()
 
-### Community 49 - "PostgreSQL Pool Facade"
-Cohesion: 0.25
-Nodes (5): connWrapper, Context, Postgres, Stat, translate()
-
-### Community 50 - "Junie Architecture Rules"
-Cohesion: 0.22
-Nodes (10): Integration Tests Moved to integration/, Inverted /internal Layout, Layered Architecture Pattern, No Build Target, SQL Externalization Not Applicable, sync.WaitGroup.Go from Stdlib, Superseded Service Template Rules, Restricted sync.Pool Usage (+2 more)
-
-### Community 51 - "Proxy Message Relay"
-Cohesion: 0.40
-Nodes (5): endsTransactionUnit(), flushIfDrained(), Reader, Writer, relay
-
-### Community 52 - "PostgreSQL LISTEN/NOTIFY"
-Cohesion: 0.29
-Nodes (5): Notification, Notifier, Context, connWrapper, quoteIdentifier()
-
-### Community 54 - "database/sql Tx Wrapper"
+### Community 59 - "database/sql Tx Wrapper"
 Cohesion: 0.31
 Nodes (5): Bool, connWrapper, Context, newTx(), pgTx
 
-### Community 55 - "Software Architect Profile"
-Cohesion: 0.22
-Nodes (9): Vendor Registry (Only Process-Global State), Interface Segregation (7-Method Ceiling, Composition), Optional Capabilities Reached by Type Assertion, pkg/pooling (Shared Engine in Core Module), pkg/sqldriver (Stdlib-Only, Serves Every database/sql Driver), One Pool Per Database, Sharing Nothing, Profile: Software Architect, A Vendor Is Its Own Go Module (+1 more)
-
-### Community 56 - "MySQL Position Tracking"
+### Community 61 - "MySQL Position Tracking"
 Cohesion: 0.31
 Nodes (5): tracker, GTIDSet, newTracker(), position, GTIDSet
 
-### Community 58 - "PostgreSQL Config Tests"
+### Community 62 - "PostgreSQL CDC Config"
+Cohesion: 0.22
+Nodes (4): regexp, Config, Duration, changesSQL()
+
+### Community 64 - "PostgreSQL Config Tests"
 Cohesion: 0.39
 Nodes (8): T, TestConfigBoundsPerConnectionCaches(), TestConfigDefaultsGiveUsableCapacity(), TestConfigDefaultsPreserveExplicitValues(), TestConfigParseIsOrderIndependent(), TestConfigParseRejectsBadConnString(), TestConfigResetQuerySelectsACompatibleExecMode(), TestConfigValidate()
 
-### Community 59 - "MySQL Position Unit Tests"
+### Community 65 - "MySQL Position Unit Tests"
 Cohesion: 0.44
 Nodes (8): parsePosition(), T, TestFilterMatching(), TestFilterMutation(), TestParsePositionIsFlavourSpecific(), TestParsePositionRejectsAForeignPosition(), TestPositionDistinguishesItsTwoNotations(), TestPositionRoundTrips()
 
-### Community 60 - "Junie Coding Guidelines"
-Cohesion: 0.25
-Nodes (8): Avoid Stuttering, PgBouncer Transaction Mode, Avoid Stuttering Rule, Interface Segregation Principle, Junie Guidelines, No Memory Leaks Rule, PgBouncer Best Practices Reference, Post-Task Cleanup and Maintenance
-
-### Community 61 - "PgBouncer Comparison Findings"
-Cohesion: 0.29
-Nodes (8): Interleave benchmark targets; do not sweep one to completion, PgBouncer's one-thread, one-core ceiling, Measured against PgBouncer 1.25.2, Interleaved targets and medians of three runs, PgBouncer cannot use a second core, Throughput measured against PgBouncer 1.25.2, PgBouncer is the more efficient of the two, so_reuseport as PgBouncer's answer to one core
-
-### Community 62 - "PostgreSQL Pool Config"
+### Community 66 - "PostgreSQL Pool Config"
 Cohesion: 0.29
 Nodes (4): cacheCapacity(), ConnConfig, Duration, Config
 
-### Community 63 - "Proxy Throughput Benchmark"
-Cohesion: 0.43
-Nodes (5): benchmarkTarget(), BenchmarkThroughput(), B, Pool, warm()
-
-### Community 65 - "Graph Reconcile Script"
+### Community 67 - "Graph Reconcile Script"
 Cohesion: 0.43
 Nodes (6): is_package(), main(), package_label(), Recover a readable import path from a synthesized package id.      The id is los, Return the extraction with package nodes added and unresolvable edges dropped., reconcile()
 
-### Community 66 - "MySQL Syncer Configuration"
+### Community 68 - "MySQL Syncer Configuration"
 Cohesion: 0.33
 Nodes (5): BinlogSyncerConfig, newFromConfig(), Config, New(), splitHostPort()
 
-### Community 67 - "PostgreSQL CDC Config"
-Cohesion: 0.33
-Nodes (3): regexp, Config, Duration
-
-### Community 68 - "Pool Statistics Interfaces"
+### Community 69 - "Pool Statistics Interfaces"
 Cohesion: 0.33
 Nodes (3): Acquisition, Occupancy, Stat
 
-### Community 70 - "PostgreSQL Single Row"
-Cohesion: 0.47
-Nodes (3): Bool, connWrapper, pgRow
-
-### Community 71 - "Proxy Credential Handling"
+### Community 72 - "Proxy Credential Files"
 Cohesion: 0.40
-Nodes (5): Decoy verifier defeats the username oracle, SCRAM-SHA-256, verifier only, Upstream string comes from the environment, not a flag, Userlist refused if readable beyond its owner, Credential handling: hash subcommand, userlist, env upstream
+Nodes (4): checkSecretPermissions(), loadUserlist(), File, userlist
 
-### Community 73 - "MySQL Pool Config"
-Cohesion: 0.40
-Nodes (3): Config, Connector, Duration
-
-### Community 75 - "database/sql Pool Config"
+### Community 73 - "database/sql Pool Config"
 Cohesion: 0.50
 Nodes (3): Connector, Duration, Config
 
-### Community 77 - "Proxy Socket Takeover"
-Cohesion: 0.67
-Nodes (3): Taking a socket over from pgx with Hijack(), ParameterStatus values captured from a real backend, Frontend.ReadBufferLen() asserted, not assumed
-
 ## Ambiguous Edges - Review These
-- `CLI Proxy Mode` → `gpool: a Go connection pooling and CDC library`  [AMBIGUOUS]
+- `CLI Proxy Mode` → `Gpool: A Go Connection Pooling & CDC Library`  [AMBIGUOUS]
   .junie/plans/gpool-lib-init.md · relation: conceptually_related_to
-- `Gpool Core Memory` → `Supported databases and their modules`  [AMBIGUOUS]
+- `Gpool Core Memory` → `Supported Databases`  [AMBIGUOUS]
   .serena/memories/core.md · relation: conceptually_related_to
+- `An Unknown User Runs the Full Exchange Against a Decoy Verifier` → `Errors Are Classified by Code, Never by Message Text`  [AMBIGUOUS]
+  .serena/memories/proxy.md · relation: semantically_similar_to
 
 ## Knowledge Gaps
-- **62 isolated node(s):** `Batcher`, `BulkCopier`, `ReplicationManager`, `Notifier`, `Pool` (+57 more)
+- **48 isolated node(s):** `PREFIX`, `PG_PASSWORD`, `MY_PASSWORD`, `CH_PASSWORD`, `MSSQL_PASSWORD` (+43 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **10 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **What is the exact relationship between `CLI Proxy Mode` and `gpool: a Go connection pooling and CDC library`?**
+- **What is the exact relationship between `CLI Proxy Mode` and `Gpool: A Go Connection Pooling & CDC Library`?**
   _Edge tagged AMBIGUOUS (relation: conceptually_related_to) - confidence is low._
-- **What is the exact relationship between `Gpool Core Memory` and `Supported databases and their modules`?**
+- **What is the exact relationship between `Gpool Core Memory` and `Supported Databases`?**
   _Edge tagged AMBIGUOUS (relation: conceptually_related_to) - confidence is low._
-- **Why does `Core` connect `Pooling Engine Core` to `Permit Token Channel`, `database/sql Connection Wrapper`, `PostgreSQL Connection Handle`, `PostgreSQL Pool Facade`, `Proxy Server Lifecycle`, `Pooling Configuration`?**
-  _High betweenness centrality (0.039) - this node is a cross-community bridge._
-- **Why does `Proxy` connect `Proxy Server Lifecycle` to `Proxy Backend Connection`, `Proxy Connection Helpers`, `Comparative Pool Benchmarks`, `Pooling Engine Core`, `Proxy Session Startup`, `Proxy Module Structure`?**
-  _High betweenness centrality (0.035) - this node is a cross-community bridge._
-- **Why does `MySQL` connect `MySQL CDC Subscriber` to `MySQL CDC Dependencies`, `MySQL Syncer Configuration`, `MySQL Binlog Stream`, `MySQL Column Name Resolution`, `MySQL Table Filter`?**
-  _High betweenness centrality (0.033) - this node is a cross-community bridge._
-- **What connects `Batcher`, `BulkCopier`, `ReplicationManager` to the rest of the system?**
-  _62 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `Pooling Engine Core` be split into smaller, more focused modules?**
-  _Cohesion score 0.05393000573723465 - nodes in this community are weakly interconnected._
+- **What is the exact relationship between `An Unknown User Runs the Full Exchange Against a Decoy Verifier` and `Errors Are Classified by Code, Never by Message Text`?**
+  _Edge tagged AMBIGUOUS (relation: semantically_similar_to) - confidence is low._
+- **Why does `session` connect `Proxy Session Startup` to `Proxy Backend Connection`, `Pooling Engine Core`, `Proxy Prepared Statements`, `Proxy Module Structure`, `Proxy Message Relay`, `Proxy Server Lifecycle`?**
+  _High betweenness centrality (0.042) - this node is a cross-community bridge._
+- **Why does `backend` connect `Proxy Backend Connection` to `Proxy Session Startup`, `Proxy Server Lifecycle`, `Proxy Module Structure`, `Proxy Prepared Statements`?**
+  _High betweenness centrality (0.030) - this node is a cross-community bridge._
+- **Why does `Core` connect `Pooling Engine Core` to `Pooling Core Tests`, `Permit Token Channel`, `PostgreSQL Pool Construction`, `Pooling Configuration`, `Proxy Server Lifecycle`, `database/sql Connection Wrapper`?**
+  _High betweenness centrality (0.028) - this node is a cross-community bridge._
+- **What connects `PREFIX`, `PG_PASSWORD`, `MY_PASSWORD` to the rest of the system?**
+  _48 weakly-connected nodes found - possible documentation gaps or missing edges._
