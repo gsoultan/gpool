@@ -45,6 +45,27 @@ TiDB parser and thirty-odd other modules, and someone who only wants a
 connection pool should not download them. The pool vendor resolves 11 modules,
 the CDC one 47.
 
+### Recovering from a failover
+
+A pool cannot tell that an idle connection died until it touches one. Noticing
+would cost a round trip on every acquire — paid forever, against a failure that
+is rare — so gpool does not pay it. What it guarantees instead is that the pool
+repairs itself without help:
+
+**One query fails per connection that died, then the pool is healthy again.**
+
+Measured by terminating every backend a pool held, on PostgreSQL and on MySQL and
+MariaDB: a pool of four costs four failed queries, and a database flapping every
+600 ms cost 9 failures against 1,206 successes. `TotalConnections` never exceeds
+`MaxConns` through any of it.
+
+The consequence for calling code is that a query can fail for a reason that is
+already fixed by the time you see it, so **retry once on a connection error**. A
+CDC stream reports the failure through `Err()` rather than hanging, and
+reconnecting replays from the slot — nothing committed during the outage is lost.
+
+`integration/failure_test.go` and `vendors/mysql/failure_test.go` hold this to it.
+
 ### What has actually been tested
 
 Every row below was run against a real server, not asserted. `.junie/scripts/testdbs.sh`

@@ -26,6 +26,30 @@ reason and the migration.
 
 ## [Unreleased]
 
+### Added
+
+- **Failure-injection tests.** The pool bounds connection lifetime precisely
+  because servers go away, and nothing tested what happens when one does: every
+  other test ran against a database that stayed up, which left the recovery path
+  the least exercised code here.
+
+  Backends are now terminated server-side, which is what a failover looks like
+  from the pool's side and needs no control over the server process. Covered on
+  the pgx path and on the `database/sql` path that MySQL, SQL Server and
+  ClickHouse share, against PostgreSQL, MySQL and MariaDB: every connection
+  killed at once, the single-connection case where the pool has nowhere to hide,
+  and a database flapping under concurrent load.
+
+  They also turned the recovery behaviour into a stated guarantee rather than an
+  assumption. One query fails per connection that died, then the pool is healthy;
+  a pool of four costs four failed queries. `TotalConnections` never exceeds
+  `MaxConns` through any of it. Calling code should retry once on a connection
+  error, and the README now says so.
+
+  For CDC the guarantee is stronger: the stream reports the failure through
+  `Err()` — `SQLSTATE 57P01` — rather than hanging, and reconnecting replays from
+  the slot, so a change committed during the outage still arrives.
+
 ## [1.0.0] - 2026-08-08
 
 The API is frozen. Everything in `pkg/gpool`, `pkg/gpool/cdc`, `pkg/pooling` and

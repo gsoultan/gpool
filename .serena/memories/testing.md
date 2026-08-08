@@ -55,3 +55,33 @@ podman run -d --rm --name gpool-test -e POSTGRES_PASSWORD=postgres -p 55432:5432
 ```
 
 CDC fixtures must drop their slot in cleanup. An abandoned slot retains WAL forever.
+
+## Failure injection: what a failover looks like from the pool
+
+`integration/failure_test.go` (pgx path) and `vendors/mysql/failure_test.go`
+(the `database/sql` path that MySQL, SQL Server and ClickHouse share).
+
+**Terminate backends server-side rather than stopping a container.**
+`pg_terminate_backend` filtered by `application_name`, or `KILL CONNECTION` by
+`information_schema.PROCESSLIST`. It is precise about which connections die,
+needs no control over the runtime, and runs in milliseconds. `BeforeConnect` sets
+the tag so a test kills its own connections and nobody else's.
+
+**The measured contract: one failed query per connection that died, then
+healthy.** A pool of four costs four failed queries; a database flapping every
+600ms cost 9 failures against 1,206 successes. `TotalConnections` never exceeds
+`MaxConns` throughout. That is not a defect to fix — detecting a connection that
+died while idle costs a round trip on every acquire, paid forever against a rare
+failure. It is why calling code should retry once on a connection error, and the
+README says so.
+
+**A CDC stream must end, not hang.** Killing the walsender
+(`pg_replication_slots.active_pid`) surfaces as `SQLSTATE 57P01` through
+`stream.Err()`, and reconnecting replays from the slot — the change committed
+during the outage still arrives.
+
+**Do not use `collect` to hold a stream open.** It stops at its count, which
+exits the range loop, which closes the stream — so the walsender is gone before
+there is anything to terminate. That turned the first version of the test into a
+silent skip. Iterate in a goroutine that never breaks out, and let the failure end
+it.
