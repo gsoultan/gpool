@@ -2,6 +2,8 @@
 
 package cdc
 
+import "time"
+
 // Op represents the type of database operation in a CDC event.
 type Op int8
 
@@ -53,6 +55,16 @@ type Event struct {
 	// it — so a consumer that must not process a change twice needs its own
 	// idempotency, not a tighter position.
 	Position Position
+	// Timestamp is when the transaction containing this change committed, as the
+	// source recorded it. Every change from one transaction carries the same value.
+	//
+	// This is the source's clock, not the consumer's, and the two are not the same
+	// clock: use it to reason about the order and age of changes at the origin, not
+	// to measure how long anything took to arrive. Resolution differs by vendor —
+	// PostgreSQL records microseconds, MySQL whole seconds — so equal timestamps do
+	// not mean simultaneous. It is the zero Time if the source did not report one.
+	Timestamp time.Time
+
 	// Before contains the row data before the change (Update and Delete only, and
 	// only for columns covered by the table's REPLICA IDENTITY).
 	Before map[string]any

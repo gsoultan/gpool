@@ -141,6 +141,9 @@ func (s *pgEventStream) run() {
 	defer close(s.events)
 
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
+	// pgoutput sends the commit time once, in the Begin that opens a transaction,
+	// and every change in that transaction carries it.
+	var committed time.Time
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
@@ -178,7 +181,7 @@ func (s *pgEventStream) run() {
 				return
 			}
 		case pglogrepl.XLogDataByteID:
-			if !s.handleXLogData(copyData.Data[1:], relations, ticker) {
+			if !s.handleXLogData(copyData.Data[1:], relations, &committed, ticker) {
 				return
 			}
 		}
@@ -213,7 +216,7 @@ func (s *pgEventStream) handleKeepalive(data []byte) bool {
 
 // handleXLogData decodes one WAL record and, when it yields an event, delivers it.
 // It reports whether to keep running.
-func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*pglogrepl.RelationMessage, ticker *time.Ticker) bool {
+func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*pglogrepl.RelationMessage, committed *time.Time, ticker *time.Ticker) bool {
 	xld, err := pglogrepl.ParseXLogData(data)
 	if err != nil {
 		s.setErr(err)
@@ -230,6 +233,10 @@ func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*pglogr
 	}
 
 	switch m := logical.(type) {
+	case *pglogrepl.BeginMessage:
+		*committed = m.CommitTime
+		return true
+
 	case *pglogrepl.RelationMessage:
 		// Relation metadata arrives once per table per session and is required to
 		// name the columns of every later row for that relation.
@@ -241,24 +248,24 @@ func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*pglogr
 		if !ok {
 			return true
 		}
-		return s.emit(pendingEvent{event: decodeInsert(rel, m, end), lsn: end}, ticker)
+		return s.emit(pendingEvent{event: decodeInsert(rel, m, end, *committed), lsn: end}, ticker)
 
 	case *pglogrepl.UpdateMessage:
 		rel, ok := relations[m.RelationID]
 		if !ok {
 			return true
 		}
-		return s.emit(pendingEvent{event: decodeUpdate(rel, m, end), lsn: end}, ticker)
+		return s.emit(pendingEvent{event: decodeUpdate(rel, m, end, *committed), lsn: end}, ticker)
 
 	case *pglogrepl.DeleteMessage:
 		rel, ok := relations[m.RelationID]
 		if !ok {
 			return true
 		}
-		return s.emit(pendingEvent{event: decodeDelete(rel, m, end), lsn: end}, ticker)
+		return s.emit(pendingEvent{event: decodeDelete(rel, m, end, *committed), lsn: end}, ticker)
 
 	default:
-		// BEGIN, COMMIT, ORIGIN, TYPE, TRUNCATE and friends carry no row change.
+		// COMMIT, ORIGIN, TYPE, TRUNCATE and friends carry no row change.
 		// Their positions are confirmed by catchUp once the pipeline drains.
 		return true
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -161,6 +162,11 @@ func (s *mysqlEventStream) handleRows(event *replication.BinlogEvent, rows *repl
 		return true
 	}
 
+	// Every binlog event header carries the time the server wrote it, which for a
+	// row event is the commit time of its transaction — whole seconds, which is
+	// all the format records.
+	committed := time.Unix(int64(event.Header.Timestamp), 0).UTC()
+
 	names, err := s.columns.names(s.ctx, rows.Table, int(rows.ColumnCount))
 	if err != nil {
 		if s.ctx.Err() == nil {
@@ -169,7 +175,7 @@ func (s *mysqlEventStream) handleRows(event *replication.BinlogEvent, rows *repl
 		return false
 	}
 
-	for _, change := range decodeRows(rows, op, names, at) {
+	for _, change := range decodeRows(rows, op, names, at, committed) {
 		select {
 		case s.events <- change:
 		case <-s.ctx.Done():

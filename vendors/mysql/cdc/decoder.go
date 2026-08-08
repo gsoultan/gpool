@@ -3,6 +3,8 @@
 package cdc
 
 import (
+	"time"
+
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
 )
@@ -13,7 +15,7 @@ import (
 // becomes many. They all share a position: the binlog names a place in the log,
 // not a place within a statement, and resuming lands on the statement boundary
 // either way.
-func decodeRows(rows *replication.RowsEvent, op cdc.Op, names []string, at cdc.Position) []cdc.Event {
+func decodeRows(rows *replication.RowsEvent, op cdc.Op, names []string, at cdc.Position, committed time.Time) []cdc.Event {
 	schema, table := string(rows.Table.Schema), string(rows.Table.Table)
 
 	// An update carries its rows in before/after pairs, so it produces half as
@@ -22,12 +24,13 @@ func decodeRows(rows *replication.RowsEvent, op cdc.Op, names []string, at cdc.P
 		events := make([]cdc.Event, 0, len(rows.Rows)/2)
 		for i := 0; i+1 < len(rows.Rows); i += 2 {
 			events = append(events, cdc.Event{
-				Op:       cdc.OpUpdate,
-				Schema:   schema,
-				Table:    table,
-				Position: at,
-				Before:   columnMap(names, rows.Rows[i]),
-				After:    columnMap(names, rows.Rows[i+1]),
+				Op:        cdc.OpUpdate,
+				Schema:    schema,
+				Table:     table,
+				Position:  at,
+				Timestamp: committed,
+				Before:    columnMap(names, rows.Rows[i]),
+				After:     columnMap(names, rows.Rows[i+1]),
 			})
 		}
 		return events
@@ -36,10 +39,11 @@ func decodeRows(rows *replication.RowsEvent, op cdc.Op, names []string, at cdc.P
 	events := make([]cdc.Event, 0, len(rows.Rows))
 	for _, row := range rows.Rows {
 		event := cdc.Event{
-			Op:       op,
-			Schema:   schema,
-			Table:    table,
-			Position: at,
+			Op:        op,
+			Schema:    schema,
+			Table:     table,
+			Position:  at,
+			Timestamp: committed,
 		}
 		if op == cdc.OpDelete {
 			event.Before = columnMap(names, row)

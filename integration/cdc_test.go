@@ -169,6 +169,14 @@ func TestCDCStreamsChanges(t *testing.T) {
 		if event.Position == cdc.NoPosition {
 			t.Errorf("event %d has no position", i)
 		}
+		// And the commit time pgoutput reports in the Begin that opened the
+		// transaction. A zero value means the Begin was decoded but discarded.
+		if event.Timestamp.IsZero() {
+			t.Errorf("event %d has no commit timestamp", i)
+		}
+		if age := time.Since(event.Timestamp); age > time.Hour || age < -time.Hour {
+			t.Errorf("event %d commit timestamp is %s, %s from now", i, event.Timestamp, age)
+		}
 	}
 
 	if got := events[0].After["email"]; got != "a@example.com" {
