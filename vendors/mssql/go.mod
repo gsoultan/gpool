@@ -3,7 +3,7 @@ module github.com/gsoultan/gpool/vendors/mssql
 go 1.26.5
 
 require (
-	github.com/gsoultan/gpool v1.0.0
+	github.com/gsoultan/gpool v1.0.1
 	github.com/microsoft/go-mssqldb v1.10.0
 )
 
