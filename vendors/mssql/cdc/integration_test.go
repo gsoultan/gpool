@@ -389,3 +389,42 @@ func contains(values []string, want string) bool {
 	}
 	return false
 }
+
+// Changes committed together share a __$start_lsn, which is what makes
+// Event.Transaction meaningful here.
+func TestSQLServerCDCGroupsChangesByTransaction(t *testing.T) {
+	f := newFixture(t)
+	subscriber := f.subscribe(t, "dbo."+f.table)
+
+	stream, err := subscriber.Subscribe(t.Context())
+	if err != nil {
+		t.Fatalf("Subscribe() = %v", err)
+	}
+	defer stream.Close()
+
+	collected := make(chan []cdc.Event, 1)
+	go func() { collected <- collect(t, stream, 4, captureWait) }()
+
+	f.exec(t, fmt.Sprintf(`BEGIN TRANSACTION;
+INSERT INTO dbo.%s (id, email) VALUES (1, 't1'), (2, 't2'), (3, 't3');
+COMMIT TRANSACTION;`, f.table))
+	f.exec(t, fmt.Sprintf("INSERT INTO dbo.%s (id, email) VALUES (4, 'alone')", f.table))
+
+	events := <-collected
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want 4", len(events))
+	}
+
+	first := events[0].Transaction
+	if first == cdc.NoPosition {
+		t.Fatal("events carry no transaction identity")
+	}
+	for i, event := range events[:3] {
+		if event.Transaction != first {
+			t.Errorf("event %d is in transaction %q, want %q", i, event.Transaction, first)
+		}
+	}
+	if events[3].Transaction == first {
+		t.Error("the fourth change reports the batch's transaction, but was committed separately")
+	}
+}

@@ -20,6 +20,15 @@ methods that only return errors — a compile-time mismatch turned into a runtim
 one. PostgreSQL carries `var _ cdc.ReplicationManager = (*Postgres)(nil)`
 explicitly, because with it off `Subscriber` nothing else would catch dropping it.
 
+**`Event.Transaction`** groups changes committed together — equal values, one
+transaction, nothing else meaningful. It reuses `Position` rather than inventing a
+type. Deferred at v0.3.0 because two vendors disagreed about transaction identity;
+the third made it obvious, because every source names the *commit* rather than the
+record: PostgreSQL the Begin message's FinalLSN, MySQL the position that only
+advances at commit, SQL Server the `__$start_lsn` its rows already share. On MySQL
+and SQL Server it therefore equals `Position`; on PostgreSQL it does not, because
+there `Position` is per record.
+
 **`Event.Timestamp`** is the source's commit time, the same on every change from
 one transaction. PostgreSQL takes it from the Begin message, MySQL and SQL Server
 from the event and the LSN-to-time mapping. Resolution differs by vendor, so

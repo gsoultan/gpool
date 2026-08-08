@@ -95,10 +95,13 @@ func pair(changes []change) []cdc.Event {
 	for i := 0; i < len(changes); i++ {
 		row := changes[i]
 		event := cdc.Event{
-			Schema:    row.schema,
-			Table:     row.table,
-			Position:  position(row.startLSN),
-			Timestamp: row.committed,
+			Schema:   row.schema,
+			Table:    row.table,
+			Position: position(row.startLSN),
+			// Every row a transaction produced shares its __$start_lsn, so the
+			// position names the transaction as well as the change.
+			Transaction: position(row.startLSN),
+			Timestamp:   row.committed,
 		}
 
 		switch row.operation {
