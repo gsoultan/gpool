@@ -56,3 +56,29 @@ type Driver[C any] interface {
 	// and the engine will discard the connection.
 	Recyclable(ctx context.Context, conn C) bool
 }
+
+// ReadinessChecker is an optional Driver capability.
+//
+// A connection can carry traffic the moment Connect returns for most vendors,
+// but some protocols need a per-connection setup exchange first — a startup
+// packet, an authentication handshake, a session preamble. That step is often
+// performed by the caller rather than the driver, because it depends on who is
+// asking: a proxy forwards the client's own startup packet, so the pool hands
+// out a raw socket and the caller completes it.
+//
+// The failure this prevents is quiet. A connection acquired and released
+// without completing that exchange goes back to the idle set indistinguishable
+// from a ready one. The next caller to assume readiness — typically a health
+// check that sends a query — gets no valid response and condemns the whole
+// backend, long after the acquisition that caused it.
+//
+// A driver that has such a step implements this, and the pool destroys rather
+// than pools a connection that never became ready. Drivers without one do not
+// implement it and are unaffected.
+type ReadinessChecker[C any] interface {
+	// Ready reports whether the connection has completed its setup.
+	//
+	// Like Dead it must not perform I/O: it is consulted on release, so it can
+	// only look at state the driver already has.
+	Ready(conn C) bool
+}

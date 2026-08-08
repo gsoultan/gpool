@@ -40,7 +40,13 @@ var ErrClosed = errors.New("gpool/pooling: pool is closed")
 //
 // All methods are safe for concurrent use, and Close is idempotent.
 type Core[C any] struct {
-	driver  Driver[C]
+	driver Driver[C]
+
+	// readiness is set when the driver implements ReadinessChecker. Resolved
+	// once at construction rather than type-asserted on every release, which
+	// is a hot path.
+	readiness ReadinessChecker[C]
+
 	config  Config
 	permits *permits
 	shards  [shardCount]shard[C]
@@ -112,6 +118,10 @@ func New[C any](driver Driver[C], config Config) (*Core[C], error) {
 		bgCtx:    ctx,
 		bgCancel: cancel,
 		bgDone:   make(chan struct{}),
+	}
+
+	if rc, ok := driver.(ReadinessChecker[C]); ok {
+		c.readiness = rc
 	}
 
 	c.maxConns.Store(config.MaxConns)
@@ -369,6 +379,14 @@ func (c *Core[C]) release(ic *idleConn[C], shardIdx int) {
 // recyclable reports whether a returned connection is fit for the next caller.
 func (c *Core[C]) recyclable(ic *idleConn[C]) bool {
 	if c.driver.Dead(ic.conn) {
+		return false
+	}
+
+	// A connection that never completed its protocol setup is destroyed rather
+	// than pooled. Nothing downstream can tell it apart from a ready one, so
+	// leaving it in the idle set turns one caller's abandoned acquisition into
+	// a failed health check and an unhealthy backend.
+	if c.readiness != nil && !c.readiness.Ready(ic.conn) {
 		return false
 	}
 
