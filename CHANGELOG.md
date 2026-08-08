@@ -26,6 +26,8 @@ reason and the migration.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-08
+
 ### Fixed
 
 - **`Resizable` could only ever shrink, on every vendor.** Growth is bounded by
@@ -523,7 +525,8 @@ test whose comment records the original failure mode.
 - PostgreSQL is the only vendor. The abstraction has not yet been proven against a
   second one.
 
-[Unreleased]: https://github.com/gsoultan/gpool/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/gsoultan/gpool/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/gsoultan/gpool/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/gsoultan/gpool/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/gsoultan/gpool/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gsoultan/gpool/compare/v0.3.0...v0.4.0
