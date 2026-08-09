@@ -26,6 +26,8 @@ reason and the migration.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-09
+
 ### Added
 
 - **`gpool.Lifecycle`, so a pool can say why its connections are being
@@ -594,7 +596,8 @@ test whose comment records the original failure mode.
 - PostgreSQL is the only vendor. The abstraction has not yet been proven against a
   second one.
 
-[Unreleased]: https://github.com/gsoultan/gpool/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/gsoultan/gpool/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/gsoultan/gpool/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/gsoultan/gpool/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/gsoultan/gpool/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/gsoultan/gpool/compare/v0.4.0...v0.5.0
