@@ -305,6 +305,11 @@ func (s *session) readPasswordMessage() ([]byte, error) {
 // ready completes startup, replaying the server's own parameters so the client
 // sees the settings it will actually be running under.
 func (s *session) ready() error {
+	// Serve warms these before accepting anyone, so this only does anything if
+	// the server was unreachable then. Paying one connection here is better than
+	// telling a client nothing about the server it is about to use.
+	s.proxy.warm(s.ctx)
+
 	messages := []pgproto3.BackendMessage{}
 	for name, value := range s.proxy.parameters() {
 		messages = append(messages, &pgproto3.ParameterStatus{Name: name, Value: value})

@@ -137,6 +137,7 @@ func (p *Proxy) Serve() error {
 			return err
 		}
 	}
+	p.warm(p.ctx)
 
 	for {
 		conn, err := p.listener.Accept()
@@ -242,6 +243,32 @@ func (p *Proxy) parameters() map[string]string {
 		return *statuses
 	}
 	return nil
+}
+
+// warm opens one backend and immediately lets it go, so the server's settings
+// are known before any client is told about them.
+//
+// Those settings are captured from a real connection rather than invented, which
+// leaves nothing to say until the pool has opened one. A client that connected
+// first was handed an empty set — survivable over the extended protocol, and
+// refused outright by pgx's simple protocol, which will not run without
+// standard_conforming_strings.
+//
+// Best effort, and bounded: a proxy started before its server must still start,
+// and a server that is unreachable now may not be later. Whoever finds the set
+// still empty asks again.
+func (p *Proxy) warm(ctx context.Context) {
+	if p.parameters() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, warmTimeout)
+	defer cancel()
+
+	handle, err := p.core.Acquire(ctx)
+	if err != nil {
+		return
+	}
+	handle.Release()
 }
 
 // upgrade wraps a client connection in TLS.

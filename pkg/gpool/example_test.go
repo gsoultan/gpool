@@ -267,3 +267,28 @@ func ExampleEngine() {
 func load() cdc.Position { return cdc.NoPosition }
 func save(cdc.Position)  {}
 func apply([]cdc.Event)  {}
+
+// Occupancy and Acquisition say how full the pool is and how hard callers are
+// competing for it. Neither says why connections are being replaced, and the two
+// reasons want opposite responses: a pool that is too small should be grown, and
+// one whose connections keep dying should not be.
+func ExampleLifecycle() {
+	pool, err := gpool.NewPool(gpool.Postgres, postgrespool.Config{
+		ConnString: "postgres://user:pass@localhost:5432/app",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
+
+	stat := pool.Stat()
+	lifecycle, ok := stat.(gpool.Lifecycle)
+	if !ok {
+		return // this engine does not account for its connections
+	}
+
+	// Rising together, the pool is short. Rising apart, the database is losing
+	// connections and a larger pool would only dial more of them.
+	fmt.Printf("%d waited for a connection, %d connections died, %d retired on schedule\n",
+		stat.EmptyAcquireCount(), lifecycle.UnhealthyConnections(), lifecycle.ExpiredConnections())
+}

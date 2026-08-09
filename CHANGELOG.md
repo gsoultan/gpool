@@ -16,8 +16,8 @@ What that promise does *not* cover, deliberately:
 - **Adding a field to a struct, or a value to `Op`.** `Event` has grown twice and
   will again. Consumers read it; nothing implements it.
 - **A new optional capability interface.** `BulkCopier`, `Batcher`, `Notifier`,
-  `Resizable` and `ReplicationManager` are reached by type assertion precisely so
-  that adding one breaks nobody.
+  `Resizable`, `Lifecycle` and `ReplicationManager` are reached by type assertion
+  precisely so that adding one breaks nobody.
 - **Vendor `Config` structs**, which gain fields as their engines do.
 - **`examples/`**, which is not part of the library.
 
@@ -25,6 +25,31 @@ Breaking changes are always listed under **Changed** or **Removed** with the
 reason and the migration.
 
 ## [Unreleased]
+
+### Added
+
+- **`gpool.Lifecycle`, so a pool can say why its connections are being
+  replaced.** `Occupancy` says how full the pool is and `Acquisition` how hard
+  callers are competing for it; neither says what is happening to what they are
+  competing for. A climbing `EmptyAcquireCount` has two opposite causes — a pool
+  that is too small, and a pool dialling replacements as fast as its connections
+  die — and raising `MaxConns` fixes the first while making the second worse.
+
+  Three disjoint counters: `ExpiredConnections` for reaching `MaxConnLifetime`
+  or `MaxConnIdleTime`, `UnhealthyConnections` for dead, never ready, or failed
+  its reset, and `EvictedConnections` for a lowered ceiling or an explicit
+  `EvictIdle`. Together they are every connection closed while running.
+  Connections closed by `Close` are in none of them, because shutdown is not
+  churn.
+
+  Reached by type assertion on the value `Stat()` returns, like `Resizable` on
+  the pool itself, so it is additive under the v1.0 freeze rather than a change
+  to an interface consumers may implement. It is counted in `pkg/pooling`, so
+  every vendor has it without a line of vendor code.
+
+  `UnhealthyConnections` counts the same events the failure-injection tests
+  measure from the caller's side: four backends terminated cost four failed
+  queries and are counted as four unhealthy connections.
 
 ### Fixed
 
@@ -49,6 +74,19 @@ reason and the migration.
   exist" the first time that client moves backends. 512 is pgx's own default.
 
   This was the last item the proxy's README named as a gap against PgBouncer.
+
+- **A client that connected before the proxy had opened a backend was told
+  nothing about the server.** `examples/gpoolproxy` replays the server's own
+  settings during client startup, captured from a real connection rather than
+  invented — so until the pool had opened one there was nothing to say, and the
+  first client got an empty set. pgx survives that on the extended protocol and
+  refuses the simple protocol without `standard_conforming_strings`; another
+  client library is entitled to do worse.
+
+  `Serve` now opens one backend and lets it go before accepting anyone, and a
+  session that still finds the set empty asks again rather than proceeding.
+  Both are best effort and bounded: a proxy started before its server must still
+  start, and a server unreachable then may not be later.
 
 ### Changed
 

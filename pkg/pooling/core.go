@@ -80,6 +80,12 @@ type Core[C any] struct {
 	emptyAcquireCount    atomic.Int64
 	canceledAcquireCount atomic.Int64
 
+	// Cumulative discard counters, indexed by the reason. Acquisition counters
+	// say how hard callers are competing for the pool; these say what is
+	// happening to what they are competing for, which is a different question and
+	// often the one with the answer in it.
+	discarded [discardCount]atomic.Int64
+
 	// resizeMu serialises SetMaxConns. The ceiling and the permit set are two
 	// separate publications, and take() reasons across both: a caller holding a
 	// permit implies fewer than MaxConns others hold one, so it may yield and
@@ -194,7 +200,7 @@ func (c *Core[C]) trimIdle(n int32) {
 			// which re-reads the ceiling, so no surplus survives indefinitely.
 			return
 		}
-		c.destroy(ic)
+		c.destroy(ic, discardEvicted)
 	}
 }
 
@@ -216,7 +222,7 @@ func (c *Core[C]) EvictIdle() int {
 	everything := func(*idleConn[C]) bool { return true }
 	for i := range c.shards {
 		for _, ic := range c.shards[i].takeIf(everything) {
-			c.destroy(ic)
+			c.destroy(ic, discardEvicted)
 			evicted++
 		}
 	}
@@ -345,7 +351,7 @@ func (c *Core[C]) popIdle() (*idleConn[C], int, bool) {
 			if !c.driver.Dead(ic.conn) && !ic.expired(now, c.config.MaxConnLifetime, c.config.MaxConnIdleTime) {
 				return ic, idx, true
 			}
-			c.destroy(ic)
+			c.destroy(ic, c.whyUnusable(ic, now))
 		}
 	}
 	return nil, 0, false
@@ -358,8 +364,12 @@ func (c *Core[C]) release(ic *idleConn[C], shardIdx int) {
 	c.checkedOut.Add(-1)
 	defer c.permits.release()
 
-	if c.closed.Load() || !c.recyclable(ic) {
-		c.destroy(ic)
+	if c.closed.Load() {
+		c.destroy(ic, discardClosed)
+		return
+	}
+	if !c.recyclable(ic) {
+		c.destroy(ic, c.whyUnusable(ic, c.clock.now()))
 		return
 	}
 
@@ -368,7 +378,7 @@ func (c *Core[C]) release(ic *idleConn[C], shardIdx int) {
 	// would keep the surplus connections open against the database, which is the
 	// resource the ceiling exists to protect.
 	if c.totalConns.Load() > c.maxConns.Load() {
-		c.destroy(ic)
+		c.destroy(ic, discardEvicted)
 		return
 	}
 
@@ -407,6 +417,23 @@ func (c *Core[C]) recyclable(ic *idleConn[C]) bool {
 	return !ic.expired(c.clock.now(), c.config.MaxConnLifetime, 0)
 }
 
+// whyUnusable names the reason a connection is being thrown away, for the sites
+// that test several conditions at once.
+//
+// Ill health is checked first and wins ties. A connection that is both dead and
+// past its lifetime is a connection that died — reporting it as a healthy
+// recycle would hide exactly the signal these counters exist to surface.
+func (c *Core[C]) whyUnusable(ic *idleConn[C], now time.Time) discard {
+	if c.driver.Dead(ic.conn) {
+		return discardUnhealthy
+	}
+	if ic.expired(now, c.config.MaxConnLifetime, c.config.MaxConnIdleTime) {
+		return discardExpired
+	}
+	// Neither dead nor timed out, so it failed its readiness check or its reset.
+	return discardUnhealthy
+}
+
 // connect establishes one new connection.
 func (c *Core[C]) connect(ctx context.Context) (*idleConn[C], error) {
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.config.ConnectTimeout > 0 {
@@ -427,12 +454,17 @@ func (c *Core[C]) connect(ctx context.Context) (*idleConn[C], error) {
 	return &idleConn[C]{conn: conn, createdAt: now, idleSince: now}, nil
 }
 
-// destroy closes a connection and drops it from the total count.
-func (c *Core[C]) destroy(ic *idleConn[C]) {
+// destroy closes a connection, records why, and drops it from the total count.
+//
+// The reason is what turns a churn rate into something actionable: a pool
+// recycling on schedule and a pool losing connections to a failing server are
+// indistinguishable in every other counter, and they want opposite responses.
+func (c *Core[C]) destroy(ic *idleConn[C], why discard) {
 	ctx, cancel := context.WithTimeout(context.Background(), connCloseTimeout)
 	_ = c.driver.Close(ctx, ic.conn)
 	cancel()
 
+	c.discarded[why].Add(1)
 	c.releaseSlot()
 }
 
@@ -478,7 +510,7 @@ func (c *Core[C]) reapExpired() {
 
 	for i := range c.shards {
 		for _, ic := range c.shards[i].takeIf(stale) {
-			c.destroy(ic)
+			c.destroy(ic, c.whyUnusable(ic, now))
 		}
 	}
 }
@@ -527,7 +559,7 @@ func (c *Core[C]) Close() {
 
 		for i := range c.shards {
 			for _, ic := range c.shards[i].drain() {
-				c.destroy(ic)
+				c.destroy(ic, discardClosed)
 			}
 		}
 	})
@@ -556,5 +588,8 @@ func (c *Core[C]) Stat() gpool.Stat {
 		waitNanos: c.acquireWaitNanos.Load(),
 		empties:   c.emptyAcquireCount.Load(),
 		canceled:  c.canceledAcquireCount.Load(),
+		expired:   c.discarded[discardExpired].Load(),
+		unhealthy: c.discarded[discardUnhealthy].Load(),
+		evicted:   c.discarded[discardEvicted].Load(),
 	}
 }

@@ -19,6 +19,11 @@ const (
 	// unbounded listener is a memory exhaustion vector rather than a feature.
 	defaultMaxClients = 1000
 
+	// warmTimeout bounds the connection opened to learn the server's settings
+	// before any client is told them. Bounded because it runs before the listener
+	// accepts: a server that is slow to answer must delay startup, not prevent it.
+	warmTimeout = 10 * time.Second
+
 	// defaultMaxPreparedStatements matches pgx's own default statement cache
 	// rather than PgBouncer's 200, because the two limits interact: a client
 	// caches statement names on its side and only ever Binds them afterwards, so

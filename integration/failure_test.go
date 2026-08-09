@@ -318,3 +318,55 @@ func TestCDCRefusesASecondConsumerOnOneSlot(t *testing.T) {
 		t.Logf("second Subscribe() failed as required, with: %v", err)
 	}
 }
+
+// The recovery contract above is measured in failed queries, which is what a
+// caller feels. Lifecycle is the same event counted from the pool's side, and it
+// has to distinguish this from a pool that is merely recycling on schedule —
+// otherwise a dashboard cannot tell a failover from a Tuesday.
+func TestLifecycleCountsTerminatedBackendsAsUnhealthy(t *testing.T) {
+	tag := uniqueTag("lifecycle")
+	pool := taggedPool(t, tag, postgrespool.Config{MaxConns: 4, MinConns: 4, HealthCheckPeriod: -1})
+
+	warmToSteadyState(t, pool, 4)
+
+	before, ok := pool.Stat().(gpool.Lifecycle)
+	if !ok {
+		t.Fatal("Stat() does not implement gpool.Lifecycle")
+	}
+	unhealthyBefore := before.UnhealthyConnections()
+
+	killed := terminate(t, tag)
+	if killed == 0 {
+		t.Fatal("terminated no backends; the pool had none open")
+	}
+
+	// A connection terminated while idle still looks alive until something writes
+	// to it, so each one is discovered by the query that meets it. The counter
+	// therefore climbs as the pool is used, one per corpse — the same number the
+	// recovery contract above states as failed queries, counted from the pool's
+	// side instead of the caller's.
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		var value int
+		_ = pool.QueryRow(t.Context(), "SELECT 1").Scan(&value)
+
+		lifecycle := pool.Stat().(gpool.Lifecycle)
+		counted := lifecycle.UnhealthyConnections() - unhealthyBefore
+		if counted < int64(killed) {
+			continue
+		}
+
+		t.Logf("%d backends terminated, %d counted unhealthy", killed, counted)
+		if got := lifecycle.ExpiredConnections(); got != 0 {
+			t.Errorf("ExpiredConnections() = %d, want 0; nothing here reached its lifetime", got)
+		}
+		if got := lifecycle.EvictedConnections(); got != 0 {
+			t.Errorf("EvictedConnections() = %d, want 0; nothing asked for an eviction", got)
+		}
+		return
+	}
+
+	final := pool.Stat().(gpool.Lifecycle).UnhealthyConnections() - unhealthyBefore
+	t.Fatalf("%d backends died and %d were counted; the signal a dashboard would alert on is incomplete",
+		killed, final)
+}

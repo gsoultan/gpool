@@ -580,3 +580,32 @@ func TestProxyEvictionIsTransparentWithinTheLimit(t *testing.T) {
 		t.Fatalf("%d clients failed while the backends were evicting", got)
 	}
 }
+
+// A client is told the server's settings during startup, and they are captured
+// from a real backend rather than invented — so until the pool has opened one
+// there is nothing to tell. The first client to connect used to be handed an
+// empty set: pgx survives that on the extended protocol and refuses the simple
+// protocol without standard_conforming_strings, and another client library is
+// entitled to do worse.
+//
+// This connects before anything has run a query, which is the only moment the
+// defect was reachable.
+func TestProxyReportsServerParametersToItsFirstClient(t *testing.T) {
+	conn := connect(t, startProxy(t, pooling.Config{MaxConns: 2}))
+
+	for _, name := range []string{"standard_conforming_strings", "server_version", "client_encoding"} {
+		if value := conn.PgConn().ParameterStatus(name); value == "" {
+			t.Errorf("ParameterStatus(%q) is empty; the client was told nothing about the server", name)
+		}
+	}
+
+	// The simple protocol is what refused to run at all without them, so it is
+	// the honest end-to-end check rather than reading the values back.
+	var answer int
+	if err := conn.QueryRow(t.Context(), "SELECT 1", pgx.QueryExecModeSimpleProtocol).Scan(&answer); err != nil {
+		t.Fatalf("simple protocol query = %v", err)
+	}
+	if answer != 1 {
+		t.Errorf("answer = %d, want 1", answer)
+	}
+}

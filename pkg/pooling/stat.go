@@ -22,9 +22,19 @@ type Stat struct {
 	waitNanos int64
 	empties   int64
 	canceled  int64
+
+	expired   int64
+	unhealthy int64
+	evicted   int64
 }
 
 var _ gpool.Stat = Stat{}
+
+// Every engine accounts for its connections, so Lifecycle is available on every
+// vendor rather than being a capability some have. It is still reached by
+// assertion, because gpool.Stat is what a consumer holds and adding to that
+// interface would break anyone implementing it.
+var _ gpool.Lifecycle = Stat{}
 
 // TotalConnections returns every connection the pool currently owns.
 func (s Stat) TotalConnections() int32 {
@@ -69,4 +79,22 @@ func (s Stat) EmptyAcquireCount() int64 {
 // CanceledAcquireCount returns how many acquisitions ended with the caller's context.
 func (s Stat) CanceledAcquireCount() int64 {
 	return s.canceled
+}
+
+// ExpiredConnections returns connections retired for reaching MaxConnLifetime or
+// MaxConnIdleTime.
+func (s Stat) ExpiredConnections() int64 {
+	return s.expired
+}
+
+// UnhealthyConnections returns connections discarded because they were dead,
+// never became ready, or failed their reset.
+func (s Stat) UnhealthyConnections() int64 {
+	return s.unhealthy
+}
+
+// EvictedConnections returns connections closed to obey a lowered ceiling or an
+// explicit EvictIdle.
+func (s Stat) EvictedConnections() int64 {
+	return s.evicted
 }

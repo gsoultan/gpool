@@ -118,10 +118,41 @@ Only the blocking path is timed — `permits.tryAcquire()` vs `permits.wait()` e
 to separate them. A clock read on the fast path would cost a meaningful fraction of
 its ~250ns.
 
+## Lifecycle counters say *why* connections are replaced
+
+`gpool.Lifecycle` — `ExpiredConnections`, `UnhealthyConnections`,
+`EvictedConnections` — asserted on the value `Stat()` returns, not on the pool.
+
+The question it answers is the one the acquisition counters cannot: a climbing
+`EmptyAcquireCount` means either a pool that is too small or a pool dialling
+replacements as fast as its connections die, and raising `MaxConns` fixes the
+first while making the second worse.
+
+Counted in `pkg/pooling`, so every vendor has it with no vendor code. Every
+`destroy` carries a `discard` reason (`discard.go`) and every one is counted, so
+the four reasons add up to every connection ever closed — a reason that went
+unrecorded would show as connections vanishing from the accounting.
+`discardClosed` is counted and reported to nobody: shutdown is not churn, and it
+would put a step in every consumer's graph at exit.
+
+`whyUnusable` checks ill health **first**, so a connection both dead and past its
+lifetime counts as dead. Reporting it as a healthy recycle would hide the exact
+signal these exist to surface.
+
+Proven against a real server: four terminated backends are counted as four
+unhealthy, which is the same number the recovery contract states as failed
+queries — see `mem:testing`.
+
+**A lifetime shorter than `clockResolution` (100ms) is invisible, not merely
+quick.** Age is judged against the cached clock, so nothing ever reads a time
+later than the one the connection was stamped with. A test wanting to observe
+expiry needs tens of milliseconds and the reaper on.
+
 ## Optional capabilities
 
-`BulkCopier` (Pool + Conn), `Batcher` (Conn), `Notifier` (Conn). Separate interfaces
-reached by type assertion, so `Pool`/`Conn` stay within the ISP method limit.
+`BulkCopier` (Pool + Conn), `Batcher` (Conn), `Notifier` (Conn), `Resizable`
+(Pool), `Lifecycle` (Stat). Separate interfaces reached by type assertion, so
+`Pool`/`Conn`/`Stat` stay within the ISP method limit.
 `gpool.CopyRows` is structurally identical to `pgx.CopyFromSource`, so the source
 passes straight through with no adapter.
 

@@ -923,6 +923,39 @@ acquisition counters separate them:
 Only waits are timed. An acquisition served immediately contributes nothing to `AcquireDuration`,
 which keeps the uncontended path free of a clock read it does not need.
 
+### Why connections are being replaced
+
+The acquisition counters say how hard callers are competing for the pool. They cannot say what is
+happening to what they are competing for, and a rising `EmptyAcquireCount` has two opposite causes:
+a pool that is too small, and a pool dialling replacements as fast as its connections die. Raising
+`MaxConns` fixes the first and makes the second worse.
+
+`Lifecycle` separates them. It is reached by asserting on the value `Stat()` returns, so an engine
+that cannot account for its connections is not obliged to pretend — every engine here can:
+
+```go
+if lifecycle, ok := pool.Stat().(gpool.Lifecycle); ok {
+    lifecycle.ExpiredConnections()    // reached MaxConnLifetime or MaxConnIdleTime
+    lifecycle.UnhealthyConnections()  // dead, never ready, or failed its reset
+    lifecycle.EvictedConnections()    // a lowered ceiling, or an explicit EvictIdle
+}
+```
+
+| Signal | Reading |
+| :--- | :--- |
+| `ExpiredConnections` rising steadily | The pool is recycling on schedule; this is what the bounds are for |
+| `ExpiredConnections` flat on a long-lived pool | Neither bound is ever reached — a failover will be the first thing that tests the recovery path |
+| `UnhealthyConnections` rising | The database is losing connections. Each one is a caller that saw an error |
+| `EvictedConnections` rising | Something asked for it: `SetMaxConns` down, or `EvictIdle` |
+
+The three are disjoint and together are every connection the pool has closed while running.
+Connections closed by `Close` are in none of them: that is shutdown, not churn, and a step in every
+consumer's graph at exit would be noise.
+
+`UnhealthyConnections` is the one to alert on, and it counts the same events as the recovery
+contract above. Terminating four backends costs four failed queries, and the pool counts four
+unhealthy connections — the same number from the caller's side and the pool's.
+
 ## 🚨 Errors
 
 All sentinels are comparable with `errors.Is`.
