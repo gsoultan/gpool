@@ -42,7 +42,13 @@ type backend struct {
 	// nothing deallocates them when a client goes away. Keeping the message
 	// rather than just the name is what lets a later client's identically named
 	// but different statement be detected instead of silently executed.
-	prepared map[string][]byte
+	//
+	// That nothing deallocates them is also why this is bounded. A connection
+	// serves client after client for the life of the pool, accumulating a
+	// statement per distinct name every one of them used; the ceiling here is on
+	// the server's memory as much as on the proxy's, which is why evicting from
+	// it sends a real Close rather than only forgetting.
+	prepared *statements
 
 	broken atomic.Bool
 }

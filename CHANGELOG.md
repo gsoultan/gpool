@@ -26,6 +26,37 @@ reason and the migration.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`examples/gpoolproxy` let a client decide how much memory it spent, on both
+  sides of the proxy.** Two maps keyed by client-supplied statement names grew
+  without limit: a session's, holding one `Parse` message per name its client
+  invented, and a pooled backend's, holding one per name *any* client had ever
+  used on it. Nothing deallocates a prepared statement when a client goes away,
+  and a backend outlives every client that touches it, so neither ever shrank.
+  The second one is PostgreSQL's memory rather than the proxy's.
+
+  Both are now bounded by `Config.MaxPreparedStatements`, discarding the least
+  recently used at the limit. A backend's eviction also closes the statement on
+  the server, so the proxy's idea of what exists and the server's stay in step,
+  and the client that prepared it is unaffected — its own set still holds the
+  `Parse` and replays it onto the next backend it lands on. Sixty statements
+  prepared against a limit of eight leave eight in `pg_prepared_statements`.
+
+  The default is 512 rather than PgBouncer's 200 because the limits interact: a
+  client caches statement names and only Binds them afterwards, so a proxy that
+  remembers fewer than the client does becomes "prepared statement does not
+  exist" the first time that client moves backends. 512 is pgx's own default.
+
+  This was the last item the proxy's README named as a gap against PgBouncer.
+
+### Changed
+
+- **`.junie/scripts/testdbs.sh` takes its host ports from the environment**
+  (`GPOOL_POSTGRES_PORT` and one per engine). They are ports on a developer's
+  machine and nothing reserves them; another project's container already holding
+  one surfaced as a container that would not bind, several steps from the cause.
+
 ## [1.0.1] - 2026-08-08
 
 ### Fixed

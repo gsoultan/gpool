@@ -18,6 +18,15 @@ const (
 	// connection costs two goroutines and two 64 KiB relay buffers, so an
 	// unbounded listener is a memory exhaustion vector rather than a feature.
 	defaultMaxClients = 1000
+
+	// defaultMaxPreparedStatements matches pgx's own default statement cache
+	// rather than PgBouncer's 200, because the two limits interact: a client
+	// caches statement names on its side and only ever Binds them afterwards, so
+	// a proxy that remembers fewer than the client does turns into "prepared
+	// statement does not exist" the first time that client moves backends. The
+	// bound exists to stop unbounded growth, and 512 does that while leaving a
+	// default-configured pgx client working.
+	defaultMaxPreparedStatements = 512
 )
 
 // Config is everything the proxy needs to run. There is no config file: flags
@@ -36,6 +45,25 @@ type Config struct {
 
 	// MaxClients bounds concurrent client sessions.
 	MaxClients int
+
+	// MaxPreparedStatements bounds how many named prepared statements are
+	// remembered, both per client session and per pooled backend. Defaults to
+	// defaultMaxPreparedStatements; negative is unlimited.
+	//
+	// Nothing deallocates a prepared statement when a client disconnects, so
+	// without a bound both sets grow at the client's discretion — the proxy's
+	// heap by one Parse message per name, and the server's by one statement per
+	// name, on a connection that outlives every client that touched it.
+	//
+	// At the limit the least recently used is discarded. On a backend it is also
+	// closed on the server, so the two stay in step; the client that prepared it
+	// is unaffected, because its own set still holds the Parse and replays it
+	// wherever it lands next. Past the limit on the *client's* set, the oldest
+	// statements stop being replayable, and a client that binds one after moving
+	// backends gets the server's own error for a statement that is not there.
+	//
+	// Setting this negative reinstates the unbounded growth it exists to prevent.
+	MaxPreparedStatements int
 
 	// Pool is the shared engine's configuration. MaxConns here is the number of
 	// real PostgreSQL backends, which is the number this whole exercise exists
@@ -56,6 +84,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.MaxClients == 0 {
 		c.MaxClients = defaultMaxClients
+	}
+	if c.MaxPreparedStatements == 0 {
+		c.MaxPreparedStatements = defaultMaxPreparedStatements
 	}
 	c.Pool = c.Pool.WithDefaults()
 	return c

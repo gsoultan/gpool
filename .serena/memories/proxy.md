@@ -144,13 +144,45 @@ measurable here", not "free".
 
 Tests fail without it with `SQLSTATE 42P05`, proven by disabling `reconcile`.
 
+## Both statement sets are bounded, and the backend's bound reaches the server
+
+`Config.MaxPreparedStatements` (default 512) caps the session's set and each
+backend's, evicting the least recently used. Unbounded, both were sized by the
+client: a session holds one Parse per name its client invents, and a backend one
+per name *any* client ever used on it. Nothing deallocates a prepared statement
+when a client disconnects, and a backend outlives every client that touches it,
+so neither shrank on its own.
+
+**Evicting from a backend sends a real Close** (`session.hold`). Forgetting alone
+would be a lie — the statement is in the server's memory whether the proxy
+remembers it or not, and a set that drifts below what the server holds is how the
+server grows with nothing accounting for it. Measured: 60 statements prepared
+against a limit of 8 leave 8 in `pg_prepared_statements`.
+
+Backend eviction is invisible to the client that prepared the statement, because
+its own set still has the Parse and replays it on the next backend. Session
+eviction is not: past the limit the oldest stop being replayable and the client
+meets the server's own "does not exist" after it moves.
+
+**The default is 512, not PgBouncer's 200, because the two limits interact.** A
+client caches statement names and only Binds afterwards, so remembering fewer
+than the client does turns into a client error the first time it moves backends.
+512 is pgx's own default cache.
+
+Eviction picks the LRU by scanning rather than keeping a list: the limit is a few
+hundred, the scan happens only once a client is at it, and the cost an adversary
+can impose stays a constant per message.
+
 ## Known gaps, deliberate
 
-Statements are never proactively deallocated, so a backend accumulates one entry
-per distinct statement until a client closes it or a name collides — PgBouncer
-bounds this with `max_prepared_statements` and this does not. No session or
-statement pooling mode, no admin console, no online reconfiguration, no md5/trust
-auth.
+No session or statement pooling mode, no admin console, no online
+reconfiguration, no md5/trust auth.
+
+One real defect: `Proxy.parameters()` is captured from the first backend the pool
+opens, so a client connecting before there is one gets no ParameterStatus at all.
+pgx tolerates it over the extended protocol and refuses the simple protocol
+without `standard_conforming_strings`. Found by the test that counts prepared
+statements server-side.
 
 LISTEN/NOTIFY and logical replication cannot traverse it, for the same reasons
 they cannot traverse PgBouncer. See `mem:pool` and `mem:cdc`.

@@ -93,13 +93,19 @@ image_of() {
   esac
 }
 
+# port_of prints the host port an engine is published on.
+#
+# Overridable per engine, because these are host ports on a developer's machine
+# and nothing reserves them. A laptop running another project's containers can
+# already own one, and the failure that produces — a container that will not bind
+# — reads as an unrelated problem several steps later.
 port_of() {
   case "$1" in
-    postgres)   echo 55432 ;;
-    mysql)      echo 53306 ;;
-    mariadb)    echo 53307 ;;
-    clickhouse) echo 59000 ;;
-    mssql)      echo 51433 ;;
+    postgres)   echo "${GPOOL_POSTGRES_PORT:-55432}" ;;
+    mysql)      echo "${GPOOL_MYSQL_PORT:-53306}" ;;
+    mariadb)    echo "${GPOOL_MARIADB_PORT:-53307}" ;;
+    clickhouse) echo "${GPOOL_CLICKHOUSE_PORT:-59000}" ;;
+    mssql)      echo "${GPOOL_MSSQL_PORT:-51433}" ;;
   esac
 }
 

@@ -49,6 +49,12 @@ func upstreamURL(t *testing.T, name string) string {
 // startProxy runs a proxy on an ephemeral port and returns a connection string
 // for it.
 func startProxy(t *testing.T, pool pooling.Config) string {
+	return startProxyLimited(t, pool, 0)
+}
+
+// startProxyLimited is startProxy with an explicit ceiling on remembered prepared
+// statements, so a test can reach the limit without preparing five hundred.
+func startProxyLimited(t *testing.T, pool pooling.Config, maxPrepared int) string {
 	t.Helper()
 
 	credential, err := deriveVerifier(proxyPassword, defaultSCRAMIterations)
@@ -61,10 +67,11 @@ func startProxy(t *testing.T, pool pooling.Config) string {
 	}
 
 	proxy, err := NewProxy(Config{
-		Listen:   "127.0.0.1:0",
-		Upstream: upstreamURL(t, appName),
-		Userlist: userlist,
-		Pool:     pool,
+		Listen:                "127.0.0.1:0",
+		Upstream:              upstreamURL(t, appName),
+		Userlist:              userlist,
+		Pool:                  pool,
+		MaxPreparedStatements: maxPrepared,
 	})
 	if err != nil {
 		t.Fatalf("NewProxy() = %v", err)
@@ -478,5 +485,98 @@ func TestProxyForgetsClosedStatements(t *testing.T) {
 	}
 	if err := conn.QueryRow(t.Context(), "temporary").Scan(&got); err != nil || got != 8 {
 		t.Fatalf("after re-preparing = %d, %v; the old statement survived", got, err)
+	}
+}
+
+// The bound has to reach the server, not just the proxy's own bookkeeping. A
+// prepared statement occupies memory in the backend that parsed it until
+// something deallocates it, and a pooled connection outlives every client that
+// ever used it — so "something" can only be the proxy.
+//
+// pg_prepared_statements is session-local, which with a single backend makes it
+// exactly the right question: asked through the proxy, it is that backend
+// reporting what it is really holding.
+func TestProxyBoundsPreparedStatementsOnTheServer(t *testing.T) {
+	const limit = 8
+	conn := connect(t, cachingURL(startProxyLimited(t, pooling.Config{MaxConns: 1}, limit)))
+
+	// Distinct SQL every time, so pgx names and prepares a new statement for each
+	// rather than binding one it has already cached.
+	for i := range 60 {
+		var answer int
+		sql := fmt.Sprintf("SELECT %d::int + $1::int", i)
+		if err := conn.QueryRow(context.Background(), sql, 1).Scan(&answer); err != nil {
+			t.Fatalf("query %d = %v", i, err)
+		}
+	}
+
+	// Asked through the unnamed statement, which the proxy deliberately never
+	// remembers, so counting does not itself add to the count.
+	var held int
+	err := conn.QueryRow(context.Background(),
+		"SELECT count(*)::int FROM pg_prepared_statements",
+		pgx.QueryExecModeExec).Scan(&held)
+	if err != nil {
+		t.Fatalf("counting prepared statements = %v", err)
+	}
+
+	t.Logf("the backend holds %d prepared statements after 60 were prepared", held)
+	if held > limit {
+		t.Errorf("the backend holds %d prepared statements, want at most the limit (%d)", held, limit)
+	}
+	if held == 0 {
+		t.Error("the backend holds none at all, so this proved nothing about eviction")
+	}
+}
+
+// Eviction has to be invisible to a client whose own working set fits under the
+// limit, however much pressure everybody else is putting on the backend it lands
+// on. Each eviction injects a Close, and the next use of that statement injects a
+// replayed Parse, both in the middle of somebody's traffic — which is where a
+// protocol mistake would surface as a client reading somebody else's reply.
+//
+// Six clients hold three statements each against a limit of eight, so the shared
+// backends evict continuously while no client ever exceeds its own share.
+func TestProxyEvictionIsTransparentWithinTheLimit(t *testing.T) {
+	url := cachingURL(startProxyLimited(t, pooling.Config{MaxConns: 2}, 8))
+
+	var wg sync.WaitGroup
+	var failures atomic.Int64
+
+	for client := range 6 {
+		wg.Go(func() {
+			conn, err := pgx.Connect(context.Background(), url)
+			if err != nil {
+				t.Errorf("client %d connect = %v", client, err)
+				failures.Add(1)
+				return
+			}
+			defer conn.Close(context.Background())
+
+			for i := range 40 {
+				// The constant identifies the statement, and the argument the
+				// call, so a reply from the wrong prepared statement is a wrong
+				// answer rather than a passing test.
+				constant := client*3 + i%3
+				sql := fmt.Sprintf("SELECT %d::int + $1::int", constant)
+
+				var answer int
+				if err := conn.QueryRow(context.Background(), sql, i).Scan(&answer); err != nil {
+					t.Errorf("client %d query %d = %v", client, i, err)
+					failures.Add(1)
+					return
+				}
+				if answer != constant+i {
+					t.Errorf("client %d query %d = %d, want %d", client, i, answer, constant+i)
+					failures.Add(1)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	if got := failures.Load(); got > 0 {
+		t.Fatalf("%d clients failed while the backends were evicting", got)
 	}
 }

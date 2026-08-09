@@ -21,6 +21,9 @@ import (
 type backendDriver struct {
 	config *pgconn.Config
 
+	// maxPrepared bounds the prepared statements each connection accumulates.
+	maxPrepared int
+
 	// params holds the ParameterStatus set the server reported, captured from a
 	// real connection and replayed to clients during their own startup. A client
 	// is entitled to server_version and friends before it will issue a query,
@@ -73,7 +76,7 @@ func (d *backendDriver) Connect(ctx context.Context) (*backend, error) {
 		pid:      hijacked.PID,
 		secret:   hijacked.SecretKey,
 		txStatus: txIdle,
-		prepared: make(map[string][]byte),
+		prepared: newStatements(d.maxPrepared),
 	}, nil
 }
 

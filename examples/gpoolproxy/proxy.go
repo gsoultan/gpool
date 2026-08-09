@@ -87,7 +87,7 @@ func NewProxy(config Config) (*Proxy, error) {
 		return nil, err
 	}
 
-	driver := &backendDriver{config: upstream}
+	driver := &backendDriver{config: upstream, maxPrepared: config.MaxPreparedStatements}
 	core, err := pooling.New(driver, config.Pool)
 	if err != nil {
 		return nil, err

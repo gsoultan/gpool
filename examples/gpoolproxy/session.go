@@ -89,7 +89,7 @@ func newSession(proxy *Proxy, conn net.Conn, key cancelKey) *session {
 		reader:     bufio.NewReaderSize(conn, clientBufSize),
 		writer:     bufio.NewWriterSize(conn, clientBufSize),
 		key:        key,
-		statements: newStatements(),
+		statements: newStatements(proxy.config.MaxPreparedStatements),
 		attach:     make(chan *backend, 1),
 		ctx:        ctx,
 		stop:       stop,
@@ -429,13 +429,19 @@ func (s *session) reconcile(target *backend, kind byte, message []byte) error {
 		// may be a different client with different SQL. Re-parsing over it fails
 		// with 42P05, and *not* re-parsing would silently run their statement
 		// instead of this one — so it is closed first, either way.
-		if _, held := target.prepared[name]; held {
+		if _, held := target.prepared.lookup(name); held {
 			if err := s.inject(target, closeStatement(name), msgCloseComplete); err != nil {
 				return err
 			}
 		}
+		// Whatever this displaces from the client's own set simply stops being
+		// replayable. It is still on the backend that has it, and that backend's
+		// limit is what eventually takes it off the server.
 		s.statements.remember(name, message)
-		target.prepared[name] = s.statements.byName[name]
+		remembered, _ := s.statements.lookup(name)
+		if err := s.hold(target, name, remembered); err != nil {
+			return err
+		}
 
 	case msgBind, msgDescribe, msgClose:
 		name, ok := statementNameOf(kind, body)
@@ -444,7 +450,7 @@ func (s *session) reconcile(target *backend, kind byte, message []byte) error {
 		}
 		if kind == msgClose {
 			// The client is deallocating it, so neither side should remember it.
-			delete(target.prepared, name)
+			target.prepared.forget(name)
 			s.statements.forget(name)
 			return nil
 		}
@@ -463,10 +469,10 @@ func (s *session) ensurePrepared(target *backend, name string) error {
 		// server will say so; forwarding is more honest than inventing an error.
 		return nil
 	}
-	if held, ok := target.prepared[name]; ok && bytes.Equal(held, remembered) {
-		return nil
-	}
-	if _, ok := target.prepared[name]; ok {
+	if held, ok := target.prepared.lookup(name); ok {
+		if bytes.Equal(held, remembered) {
+			return nil
+		}
 		if err := s.inject(target, closeStatement(name), msgCloseComplete); err != nil {
 			return err
 		}
@@ -475,8 +481,25 @@ func (s *session) ensurePrepared(target *backend, name string) error {
 	if err := s.inject(target, remembered, msgParseComplete); err != nil {
 		return err
 	}
-	target.prepared[name] = remembered
-	return nil
+	return s.hold(target, name, remembered)
+}
+
+// hold records a statement as present on a backend, closing whatever had to be
+// discarded to make room for it.
+//
+// Forgetting alone would be a lie: the statement is on the server whether the
+// proxy remembers it or not, and a set that silently drifts below what the server
+// holds is how the server's memory grows without anything accounting for it. The
+// client that prepared the evicted statement is unharmed — its own set still has
+// the Parse, so the next backend it lands on gets it replayed.
+//
+// The caller holds s.mu.
+func (s *session) hold(target *backend, name string, message []byte) error {
+	evicted, didEvict := target.prepared.remember(name, message)
+	if !didEvict {
+		return nil
+	}
+	return s.inject(target, closeStatement(evicted), msgCloseComplete)
 }
 
 // inject writes a message the client did not send, and records the completion

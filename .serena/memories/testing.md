@@ -62,6 +62,13 @@ Or bring up all five engines at once, which is what CI does:
 ./.junie/scripts/testdbs.sh up && eval "$(./.junie/scripts/testdbs.sh env)"
 ```
 
+The host ports come from the environment (`GPOOL_POSTGRES_PORT` and one per
+engine) because nothing reserves them on a developer's machine. Another project's
+container holding one shows up as a container that will not bind, which reads as
+an unrelated problem several steps from the cause. Pipe `up` through anything and
+you throw away its exit status, which is how a failed start becomes a run where
+every test skips.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml`: format and vet, unit tests with no database, the

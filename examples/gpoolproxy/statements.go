@@ -24,7 +24,8 @@ const (
 	describeStatement = 'S'
 )
 
-// statements remembers the prepared statements one client has created.
+// statements remembers the prepared statements one client has created, up to a
+// limit, discarding the least recently used to stay under it.
 //
 // Transaction-mode pooling moves a client between backends, and a named prepared
 // statement lives on the backend that parsed it. Without this, a client that
@@ -34,33 +35,102 @@ const (
 //
 // What is remembered is the whole Parse message, byte for byte, so replaying it
 // needs no re-encoding and cannot disagree with what the client actually sent.
+//
+// The limit is what keeps a set the client controls from being unbounded. Both
+// users of this type are filled by client-supplied names: a session's set grows
+// with what one client prepares, and a backend's with what every client that ever
+// held it prepared. Neither shrinks on its own, because nothing deallocates a
+// prepared statement when a client goes away.
 type statements struct {
-	byName map[string][]byte
+	byName map[string]*statement
+
+	// limit is the most that may be held at once. Zero or less is unlimited.
+	limit int
+
+	// uses orders the entries by recency. A counter rather than a timestamp
+	// because only the order matters, and the coarse clock this proxy runs on
+	// would tie every entry within its resolution.
+	uses uint64
 }
 
-func newStatements() *statements {
-	return &statements{byName: make(map[string][]byte)}
+type statement struct {
+	message []byte
+	used    uint64
 }
 
-// remember records a Parse so it can be replayed onto another backend.
+func newStatements(limit int) *statements {
+	return &statements{byName: make(map[string]*statement), limit: limit}
+}
+
+// remember records a Parse so it can be replayed onto another backend, and names
+// whatever had to be discarded to make room.
 //
 // The unnamed statement is deliberately not remembered. It lives only until the
 // next Parse, every client overwrites it constantly, and replaying a stale one
 // would bind arguments to the wrong SQL.
-func (s *statements) remember(name string, message []byte) {
+func (s *statements) remember(name string, message []byte) (evicted string, didEvict bool) {
 	if name == "" {
-		return
+		return "", false
 	}
-	s.byName[name] = bytes.Clone(message)
+	s.uses++
+
+	// Re-preparing under a name already held replaces it. Counting that as a new
+	// entry would spend the limit on a client that only ever holds one statement.
+	if held, ok := s.byName[name]; ok {
+		held.message = bytes.Clone(message)
+		held.used = s.uses
+		return "", false
+	}
+
+	if s.limit > 0 && len(s.byName) >= s.limit {
+		evicted, didEvict = s.evict()
+	}
+	s.byName[name] = &statement{message: bytes.Clone(message), used: s.uses}
+	return evicted, didEvict
+}
+
+// evict discards the least recently used statement and names it.
+//
+// Found by a scan rather than kept in a list: the limit is a few hundred, a scan
+// happens only once a client is already at it, and a few hundred comparisons are
+// nothing beside the round trip the Parse that triggered it is about to make. The
+// cost an adversarial client can impose is therefore a constant per message, not
+// a growing one.
+func (s *statements) evict() (string, bool) {
+	var oldest string
+	var oldestUse uint64
+	first := true
+
+	for name, held := range s.byName {
+		if first || held.used < oldestUse {
+			oldest, oldestUse, first = name, held.used, false
+		}
+	}
+	if first {
+		return "", false
+	}
+	delete(s.byName, oldest)
+	return oldest, true
 }
 
 func (s *statements) forget(name string) {
 	delete(s.byName, name)
 }
 
+// lookup returns a remembered Parse and marks it as the most recently used, which
+// is what keeps a client's working set from being evicted out from under it.
 func (s *statements) lookup(name string) ([]byte, bool) {
-	message, ok := s.byName[name]
-	return message, ok
+	held, ok := s.byName[name]
+	if !ok {
+		return nil, false
+	}
+	s.uses++
+	held.used = s.uses
+	return held.message, true
+}
+
+func (s *statements) len() int {
+	return len(s.byName)
 }
 
 // parseName reads the statement name a Parse message declares, which is the

@@ -131,15 +131,20 @@ Any target whose URL is unset is skipped, so a partial comparison still runs.
 
 ## What it does and does not implement
 
-Implemented: transaction-mode pooling, **named prepared statements**,
-SCRAM-SHA-256 with clients, optional TLS on the client side, query cancellation
-(translated from the proxy's key to the backend's), bounded clients, and rollback
-of a transaction whose client disconnected.
+Implemented: transaction-mode pooling, **named prepared statements** under a
+bound, SCRAM-SHA-256 with clients, optional TLS on the client side, query
+cancellation (translated from the proxy's key to the backend's), bounded clients,
+and rollback of a transaction whose client disconnected.
 
 Not implemented, deliberately: session and statement pooling modes, an admin
 console (`SHOW POOLS`), online reconfiguration, `md5` and `trust` authentication,
-a bound on how many prepared statements a backend may accumulate, and multiple
-upstream databases. Each is real work rather than an oversight.
+and multiple upstream databases. Each is real work rather than an oversight.
+
+One known defect, found by the test that measures the bound above: the server
+settings replayed during a client's startup are captured from the first backend
+the pool opens, so a client that connects before there is one receives none. pgx
+does not mind over the extended protocol but refuses the simple protocol without
+`standard_conforming_strings`.
 
 ### Prepared statements
 
@@ -167,10 +172,27 @@ The cost was not measurable against this benchmark's noise: reading three of the
 roughly five messages per query into a reused buffer and looking up a name, set
 against a round trip of tens of microseconds.
 
-What it does not do: statements are never proactively deallocated, so a backend
-accumulates one entry per distinct statement it has seen until a client closes it
-or a name collides. PgBouncer bounds this with `max_prepared_statements`; this
-example does not.
+Both sets are bounded, by `MaxPreparedStatements` (default 512), because nothing
+deallocates a prepared statement when a client goes away. Without a limit a
+client chooses how much memory the proxy spends — one Parse message per name it
+invents — and a pooled backend, which outlives every client that touches it,
+accumulates one statement per name any of them ever used. That second one is
+PostgreSQL's memory, not the proxy's.
+
+At the limit the least recently used is discarded, and on a backend it is also
+closed on the server, so the proxy's idea of what exists and the server's stay in
+step. Evicting from a backend costs the client that prepared it nothing: its own
+set still holds the Parse, so the next backend it lands on has it replayed. A
+measured run prepares 60 statements against a limit of 8 and finds 8 in
+`pg_prepared_statements` afterwards.
+
+The default is 512 rather than PgBouncer's 200 because the two limits interact.
+A client caches statement names on its own side and only Binds them afterwards,
+so a proxy that remembers fewer than the client does turns into "prepared
+statement does not exist" the first time that client moves backends — and 512 is
+pgx's own default cache. Set it below your client's cache and you are choosing
+that failure; set it negative and you are choosing the unbounded growth it exists
+to prevent.
 
 **LISTEN/NOTIFY cannot work** through transaction-mode pooling, here or in
 PgBouncer: a subscription needs a session, which is what transaction pooling
