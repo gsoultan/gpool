@@ -26,6 +26,21 @@ reason and the migration.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A quiet PostgreSQL publication pinned WAL again after two transactions
+  interleaved.** pgoutput sends transactions in commit order, but each change
+  keeps the LSN of its own record, so a transaction that wrote first and
+  committed last arrives with positions *below* the one before it. The stream
+  decided the consumer had caught up by comparing the last pushed position with
+  the confirmed one, and after an interleave those never matched again: the slot
+  stopped following the server's keepalives until the next published change, and
+  retained every WAL segment written meanwhile. It now counts events handed to
+  the consumer against events it has finished, which is correct whatever order
+  the positions arrive in. Comparing against the highest pushed position instead
+  was rejected: it would confirm past a lower-positioned event still inside the
+  loop body, and lose that transaction on restart.
+
 ## [1.1.0] - 2026-08-09
 
 ### Added

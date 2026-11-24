@@ -572,3 +572,94 @@ func TestCDCGroupsChangesByTransaction(t *testing.T) {
 		t.Error("two changes in one transaction share a Position; it should name the record")
 	}
 }
+
+// pgoutput sends transactions in commit order, but each change keeps the LSN of
+// its own WAL record, so when two transactions interleave the second one
+// delivered reports positions *below* the first. The stream used to decide that
+// the consumer had caught up by comparing the last pushed position with the
+// confirmed one; after an interleave those never matched again, so an idle
+// publication stopped confirming the server's WAL end and pinned WAL on the
+// primary until the next published change. Sequential transactions hid it.
+func TestCDCConfirmsPastInterleavedTransactions(t *testing.T) {
+	f := newCDCFixture(t)
+	subscriber := f.subscribe(t)
+	ctx := t.Context()
+
+	stream, err := subscriber.Subscribe(ctx)
+	if err != nil {
+		t.Fatalf("Subscribe() = %v", err)
+	}
+	defer stream.Close()
+
+	// The consumer stays attached for the whole test: collect would close the
+	// stream, and a closed stream confirms nothing further.
+	received := make(chan cdc.Event, 2)
+	go func() {
+		for event := range stream.All() {
+			received <- event
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	// T1 writes first and commits last, so its change is delivered after T2's
+	// but carries the lower LSN.
+	held, err := f.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire() = %v", err)
+	}
+	defer held.Release()
+	tx, err := held.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin() = %v", err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("INSERT INTO %s (email) VALUES ('first-written')", f.table)); err != nil {
+		t.Fatalf("INSERT in T1 = %v", err)
+	}
+	if _, err := f.pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s (email) VALUES ('first-committed')", f.table)); err != nil {
+		t.Fatalf("INSERT in T2 = %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit() of T1 = %v", err)
+	}
+
+	for range 2 {
+		select {
+		case <-received:
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for the two interleaved changes")
+		}
+	}
+
+	// Now the publication goes quiet while the database keeps writing.
+	noise := f.table + "_noise"
+	if _, err := f.pool.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (x int)", noise)); err != nil {
+		t.Fatalf("creating the unpublished table = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", noise))
+	})
+	for range 10 {
+		if _, err := f.pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s SELECT generate_series(1, 5000)", noise)); err != nil {
+			t.Fatalf("writing unpublished WAL = %v", err)
+		}
+	}
+
+	// The unpublished writes alone are a few MiB, so a slot still pinned at the
+	// last change retains at least that much. A slot that catches up retains
+	// roughly nothing.
+	const caughtUp = 512 << 10
+	deadline := time.Now().Add(15 * time.Second)
+	var lag int64
+	for time.Now().Before(deadline) {
+		lag, err = slotRetainedBytes(f, t)
+		if err != nil {
+			t.Fatalf("reading slot lag = %v", err)
+		}
+		if lag < caughtUp {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("slot is retaining %d bytes of WAL after the publication went quiet, want under %d - "+
+		"the confirmed position stopped advancing after interleaved transactions", lag, caughtUp)
+}
