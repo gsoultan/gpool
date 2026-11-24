@@ -33,8 +33,11 @@ reason and the migration.
   `gpoolproxy` example) moves from 1.26.5 to 1.27.4, and CI builds with it.
   1.26.5 carried standard-library advisories that failed `govulncheck`.
   A consumer still on Go 1.26 must upgrade before taking this release.
-- The `gpoolproxy` example requires `golang.org/x/text` v0.44.0 (was v0.40.0),
-  clearing the advisory `govulncheck` reported against the older version.
+- Dependency minimums raised to clear reachable `govulncheck` findings:
+  `golang.org/x/text` v0.44.0 (GO-2026-6629, reachable from the PostgreSQL CDC
+  dial path) in the core, MySQL CDC, SQL Server and `gpoolproxy` modules;
+  `github.com/klauspost/compress` v1.20.2 (GO-2026-6865) in MySQL CDC and
+  ClickHouse; `github.com/andybalholm/brotli` v1.2.7 (GO-2026-6888) in ClickHouse.
 
 ## [1.1.0] - 2026-08-09
 
