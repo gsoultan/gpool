@@ -1,6 +1,6 @@
 module github.com/gsoultan/gpool/vendors/mysql/cdc
 
-go 1.26.5
+go 1.27.4
 
 require (
 	github.com/go-mysql-org/go-mysql v1.16.0

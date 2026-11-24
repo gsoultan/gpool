@@ -1,6 +1,6 @@
 # Gpool: A Go Connection Pooling & CDC Library
 
-Gpool is a Go 1.26-native **library** for connection pooling — PostgreSQL, MySQL, MariaDB,
+Gpool is a Go 1.27-native **library** for connection pooling — PostgreSQL, MySQL, MariaDB,
 SQL Server and ClickHouse — with Change Data Capture for PostgreSQL, MySQL and SQL Server. It is designed to be embedded in your application or composed into another library — there
 is no daemon, no CLI, no config file, no logger, and no process-global state.
 

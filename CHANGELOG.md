@@ -26,6 +26,16 @@ reason and the migration.
 
 ## [Unreleased]
 
+### Changed
+
+- **Go 1.27.4 is now the minimum toolchain.** Every module's `go` directive
+  (core, the MySQL, MySQL CDC, SQL Server and ClickHouse vendors, and the
+  `gpoolproxy` example) moves from 1.26.5 to 1.27.4, and CI builds with it.
+  1.26.5 carried standard-library advisories that failed `govulncheck`.
+  A consumer still on Go 1.26 must upgrade before taking this release.
+- The `gpoolproxy` example requires `golang.org/x/text` v0.44.0 (was v0.40.0),
+  clearing the advisory `govulncheck` reported against the older version.
+
 ## [1.1.0] - 2026-08-09
 
 ### Added

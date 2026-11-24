@@ -1,6 +1,6 @@
 module github.com/gsoultan/gpool
 
-go 1.26.5
+go 1.27.4
 
 require (
 	github.com/jackc/pglogrepl v0.0.0-20260401131349-e37c41485510
