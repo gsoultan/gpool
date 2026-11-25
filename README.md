@@ -673,7 +673,7 @@ database and the load generator, median of three interleaved passes:
 
 With 3,000 clients querying, PgBouncer is 21.6 MiB resident and gpoolproxy 24 to
 29; an idle client costs 1.9 KiB in one and 2.2 KiB in the other. PgBouncer is
-the lighter process when nearly empty (3.6 MiB against 8.6, most of it the Go
+the lighter process when nearly empty (3.6 MiB against 7.4, most of it the Go
 binary's own text) and a little cheaper at one client. From eight clients the
 two cost the same CPU per query, because gpoolproxy keeps a single worker awake
 until one is not enough, and past a hundred it is cheaper and faster, because

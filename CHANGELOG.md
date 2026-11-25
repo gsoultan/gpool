@@ -47,6 +47,19 @@ reason and the migration.
 
 ### Changed
 
+- **`examples/gpoolproxy` logs in to PostgreSQL with its own code instead of
+  pgx.** The proxy only ever needed a client library for the upstream login,
+  after which the connection is a descriptor on the event loop. That login is
+  now a few hundred lines here: TLS negotiation with libpq's `sslmode`
+  meanings, the startup packet, and SCRAM-SHA-256, MD5 and cleartext
+  authentication. The stripped binary went from 6.9 MB to 5.5 and an empty
+  process from 8.6 MiB to 7.4; nothing third-party is linked into it.
+
+  **Migration:** the upstream must be a `postgres://` URL. `~/.pgpass`, service
+  files, `PG*` environment variables, keyword/value strings and multi-host URLs
+  are no longer read. A cleartext password is refused unless the connection is
+  TLS or a Unix socket, and the password is not passed through SASLprep.
+
 - **`examples/gpoolproxy` is an event loop over raw sockets rather than two
   goroutines per client.** A client costs a descriptor and about a kilobyte once
   it has authenticated: its socket is registered with one shared epoll instance,

@@ -4,13 +4,8 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"sync/atomic"
 	"syscall"
-
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // backendDriver dials PostgreSQL for pooling.Core.
@@ -19,7 +14,7 @@ import (
 // all — no rows, no queries, just a socket — is the point of it being generic
 // over the connection type rather than over an interface.
 type backendDriver struct {
-	config *pgconn.Config
+	upstream *upstream
 
 	// maxPrepared bounds the prepared statements each connection accumulates.
 	maxPrepared int
@@ -40,12 +35,8 @@ var _ interface {
 } = (*backendDriver)(nil)
 
 // Connect establishes one connection and takes it over at the byte level.
-//
-// pgconn does the handshake — TLS negotiation, SCRAM, parameter collection — and
-// Hijack then surrenders the socket. Reimplementing that handshake to own the
-// socket from the first byte would mean a second, less tested copy of it.
 func (d *backendDriver) Connect(ctx context.Context) (*backend, error) {
-	return d.dial(ctx, d.config.Copy())
+	return d.dial(ctx)
 }
 
 // Replicate establishes a connection in replication mode, for one client and
@@ -55,55 +46,31 @@ func (d *backendDriver) Connect(ctx context.Context) (*backend, error) {
 // for logical replication, a boolean for physical. The server decides what it
 // allows, as it would have had the client connected directly.
 func (d *backendDriver) Replicate(ctx context.Context, mode string) (*backend, error) {
-	config := d.config.Copy()
-	if config.RuntimeParams == nil {
-		config.RuntimeParams = map[string]string{}
-	}
-	config.RuntimeParams["replication"] = mode
-	return d.dial(ctx, config)
+	return d.dial(ctx, [2]string{"replication", mode})
 }
 
-func (d *backendDriver) dial(ctx context.Context, config *pgconn.Config) (*backend, error) {
-	conn, err := pgconn.ConnectConfig(ctx, config)
+func (d *backendDriver) dial(ctx context.Context, extra ...[2]string) (*backend, error) {
+	established, err := d.upstream.connect(ctx, extra...)
 	if err != nil {
 		return nil, err
-	}
-
-	hijacked, err := conn.Hijack()
-	if err != nil {
-		_ = conn.Close(ctx)
-		return nil, err
-	}
-
-	// Taking the socket over is only sound if pgconn's own reader has nothing
-	// left in it. After ReadyForQuery the server is silent, so this should always
-	// hold; asserting it means a future pgx that reads ahead fails loudly here
-	// rather than by silently dropping a message into a client's result set.
-	if buffered := hijacked.Frontend.ReadBufferLen(); buffered != 0 {
-		_ = hijacked.Conn.Close()
-		return nil, fmt.Errorf("gpoolproxy: %d bytes buffered after handshake, cannot take over the connection", buffered)
 	}
 
 	if d.params.Load() == nil {
-		statuses := make(map[string]string, len(hijacked.ParameterStatuses))
-		for name, value := range hijacked.ParameterStatuses {
-			statuses[name] = value
-		}
-		d.params.CompareAndSwap(nil, &statuses)
+		d.params.CompareAndSwap(nil, &established.statuses)
 	}
 
-	// From here the connection is a descriptor. pgconn did the part that is worth
-	// not reimplementing; what remains is moving bytes, and an event loop does
-	// that without a goroutine parked on every socket.
-	fd, err := takeOver(hijacked.Conn)
+	// From here the connection is a descriptor. The login is over and what
+	// remains is moving bytes, which an event loop does without a goroutine
+	// parked on every socket.
+	fd, err := takeOver(established.conn)
 	if err != nil {
-		_ = hijacked.Conn.Close()
+		_ = established.conn.Close()
 		return nil, err
 	}
 
 	b := &backend{
-		pid:      hijacked.PID,
-		secret:   hijacked.SecretKey,
+		pid:      established.pid,
+		secret:   established.secret,
 		txStatus: txIdle,
 		prepared: newStatements(d.maxPrepared),
 	}
@@ -161,36 +128,7 @@ func (d *backendDriver) Recyclable(ctx context.Context, b *backend) bool {
 	return true
 }
 
-// cancel opens a fresh connection and asks the server to cancel whatever the
-// backend with this key is running. PostgreSQL requires the request on a separate connection,
-// because the one being cancelled is by definition busy.
+// cancel asks the server to cancel what a backend is running.
 func (d *backendDriver) cancel(ctx context.Context, pid uint32, secret []byte) error {
-	dialer := &net.Dialer{}
-	network, address := networkAddress(d.config)
-
-	conn, err := dialer.DialContext(ctx, network, address)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-
-	encoded, err := (&pgproto3.CancelRequest{ProcessID: pid, SecretKey: secret}).Encode(nil)
-	if err != nil {
-		return err
-	}
-	_, err = conn.Write(encoded)
-	return err
-}
-
-// networkAddress renders a pgconn.Config's host and port as a dial target,
-// distinguishing a Unix socket directory from a TCP host.
-func networkAddress(config *pgconn.Config) (network, address string) {
-	if len(config.Host) > 0 && config.Host[0] == '/' {
-		return "unix", fmt.Sprintf("%s/.s.PGSQL.%d", config.Host, config.Port)
-	}
-	return "tcp", net.JoinHostPort(config.Host, fmt.Sprint(config.Port))
+	return d.upstream.cancel(ctx, pid, secret)
 }

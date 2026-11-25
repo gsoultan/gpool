@@ -11,8 +11,6 @@ import (
 	"io"
 	"net"
 	"strings"
-
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // Startup-phase packets carry a version code instead of a message type.
@@ -119,10 +117,8 @@ func replicationMode(value string) (string, bool) {
 
 // startup performs the client handshake up to ReadyForQuery.
 //
-// The startup phase is parsed here rather than through pgproto3.Backend so that
-// the proxy owns its socket buffer from the first byte. Handing the reader to a
-// decoder and taking it back would mean trusting that the decoder had not read
-// ahead, and unlike the frontend it offers no way to check.
+// The startup phase is parsed here, by hand, so that the proxy owns its socket
+// buffer from the first byte and knows exactly what has been read from it.
 func (s *handshake) startup() error {
 	for {
 		code, body, err := s.readStartupPacket()
@@ -216,7 +212,7 @@ func (s *handshake) authenticate(user string) error {
 	}
 	scram := &scramServer{verifier: credential}
 
-	if err := s.send(&pgproto3.AuthenticationSASL{AuthMechanisms: []string{"SCRAM-SHA-256"}}); err != nil {
+	if err := s.send(appendAuthentication(nil, authSASL, append(terminated(scramMechanism), 0))); err != nil {
 		return err
 	}
 
@@ -228,7 +224,7 @@ func (s *handshake) authenticate(user string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.send(&pgproto3.AuthenticationSASLContinue{Data: challenge}); err != nil {
+	if err := s.send(appendAuthentication(nil, authSASLContinue, challenge)); err != nil {
 		return err
 	}
 
@@ -244,10 +240,7 @@ func (s *handshake) authenticate(user string) error {
 		return ErrAuthFailed
 	}
 
-	return s.send(
-		&pgproto3.AuthenticationSASLFinal{Data: signature},
-		&pgproto3.AuthenticationOk{},
-	)
+	return s.send(appendAuthentication(appendAuthentication(nil, authSASLFinal, signature), authOK, nil))
 }
 
 // readSASLInitialResponse reads the client's first SASL message and checks the
@@ -310,28 +303,17 @@ func (s *handshake) ready() error {
 	// telling a client nothing about the server it is about to use.
 	s.proxy.warm(s.ctx)
 
-	messages := []pgproto3.BackendMessage{}
+	var buf []byte
 	for name, value := range s.proxy.parameters() {
-		messages = append(messages, &pgproto3.ParameterStatus{Name: name, Value: value})
+		buf = appendParameterStatus(buf, name, value)
 	}
-	messages = append(messages,
-		&pgproto3.BackendKeyData{ProcessID: s.key.pid, SecretKey: []byte(s.key.secret)},
-		&pgproto3.ReadyForQuery{TxStatus: txIdle},
-	)
-	return s.send(messages...)
+	buf = appendBackendKeyData(buf, s.key.pid, []byte(s.key.secret))
+	return s.send(appendReadyForQuery(buf, txIdle))
 }
 
-// send encodes backend messages and writes them as one segment.
-func (s *handshake) send(messages ...pgproto3.BackendMessage) error {
-	var buf []byte
-	var err error
-
-	for _, message := range messages {
-		if buf, err = message.Encode(buf); err != nil {
-			return err
-		}
-	}
-	_, err = s.conn.Write(buf)
+// send writes encoded messages as one segment.
+func (s *handshake) send(encoded []byte) error {
+	_, err := s.conn.Write(encoded)
 	return err
 }
 
@@ -340,18 +322,18 @@ func (s *handshake) send(messages ...pgproto3.BackendMessage) error {
 // The message is deliberately generic. An authentication failure that explained
 // itself would tell an unauthenticated peer whether a username exists.
 func (s *handshake) reject(cause error) {
-	message := &pgproto3.ErrorResponse{Severity: "FATAL", Code: "08P01", Message: "protocol error"}
+	code, text := "08P01", "protocol error"
 	switch {
 	case errors.Is(cause, ErrAuthFailed):
-		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "28P01", Message: "authentication failed"}
+		code, text = "28P01", "authentication failed"
 	case errors.Is(cause, errReplicationDisabled):
-		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "0A000", Message: "replication connections are not enabled on this proxy"}
+		code, text = "0A000", "replication connections are not enabled on this proxy"
 	case errors.Is(cause, errReplicationFull):
-		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "53300", Message: "too many replication connections"}
+		code, text = "53300", "too many replication connections"
 	case errors.Is(cause, errReplicationUnavailable):
-		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "08006", Message: "the server did not accept a replication connection"}
+		code, text = "08006", "the server did not accept a replication connection"
 	}
-	_ = s.send(message)
+	_ = s.send(errorResponse("FATAL", code, text))
 }
 
 // parameterOf extracts a startup parameter from its null-terminated key/value list.

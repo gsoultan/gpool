@@ -45,6 +45,42 @@ The upstream connection string comes from the environment rather than a flag
 because a command line is readable by every process on the host. The userlist is
 refused outright if it is readable beyond its owner.
 
+### The upstream connection
+
+The proxy logs in to PostgreSQL with its own code, not a client library: nothing
+in the binary comes from outside this repository and the Go standard library.
+It reads a `postgres://` URL and only that.
+
+| In the URL | Meaning |
+| :--- | :--- |
+| `user:password@host:port/database` | as usual; port defaults to 5432, database to the user |
+| `host=/var/run/postgresql` | a Unix socket directory, for a proxy on the database's own host |
+| `sslmode` | `disable`, `prefer` (the default), `require`, `verify-ca`, `verify-full`, with libpq's meanings |
+| `sslrootcert`, `sslcert`, `sslkey` | PEM files |
+| `connect_timeout` | seconds |
+| anything else | sent to the server as a setting: `application_name`, `options`, `search_path` |
+
+Authentication is SCRAM-SHA-256, MD5 or a cleartext password, whichever the
+server asks for. Three things are stricter or narrower than libpq, on purpose:
+
+- **Nothing is read from anywhere else.** No `~/.pgpass`, no service file, no
+  `PG*` environment variables, no keyword/value strings, no list of hosts. Each
+  is a place a credential can come from that the operator did not write down.
+- **A cleartext password is sent only over TLS or a Unix socket.** A server, or
+  something answering in its place, that asks for one on an unencrypted
+  connection is refused before the password is written.
+- **The password is not passed through SASLprep.** For printable ASCII that
+  changes nothing. A password SASLprep would rewrite will not authenticate.
+
+SCRAM is verified in both directions: a server that cannot prove it knew the
+password's verifier is refused, even if it says the login succeeded.
+
+**On the database's own host, use the socket or `sslmode=disable`.** `prefer`
+encrypts whenever the server offers to, and an encrypted server connection
+cannot be a bare descriptor on the event loop: it goes through a goroutine
+bridge. Measured against a server with `ssl = on`, that took one client from
+47 µs of CPU a query to 112.
+
 Clients then connect to the proxy instead of the database:
 
 ```
@@ -135,8 +171,8 @@ Memory, resident, MiB:
 
 | | PgBouncer | gpoolproxy |
 | :--- | ---: | ---: |
-| just started, no clients | 3.6 | 8.6 |
-| of which private (not the binary's own pages) | 1.0 | 1.6 |
+| just started, no clients | 3.6 | 7.4 |
+| of which private (not the binary's own pages) | 1.0 | 1.5 |
 | 3,000 clients connected and idle | 9.0 | 15.1 |
 | per idle client | 1.9 KiB | 2.2 KiB |
 | 3,000 clients querying, first sweep | 21.6 | 24.1 |
@@ -149,7 +185,7 @@ machine: resident memory with 3,000 querying clients was 154.9 MiB, an idle
 client cost 33 KiB, CPU per query was 132.8 µs at one client and 36.2 µs at
 3,000, and one client got 5,562 queries per second.
 
-Storage: the gpoolproxy binary is 10.1 MB, or 6.9 MB built with
+Storage: the gpoolproxy binary is 8.0 MB, or 5.5 MB built with
 `-ldflags="-s -w" -trimpath`, and needs nothing else on disk. The PgBouncer
 binary is 0.4 MB and loads about 12.8 MB of shared libraries, libc included,
 which a host usually has already.
@@ -162,9 +198,9 @@ against PgBouncer's 21.6. An idle client went from 33 KiB to 2.2 KiB, against
 1.9 KiB.
 
 **The floor is the Go runtime, and it is higher than PgBouncer's.** An empty
-gpoolproxy is 8.6 MiB resident. About 7 MiB of that is the binary's own text
+gpoolproxy is 7.4 MiB resident. About 6 MiB of that is the binary's own text
 mapped from disk, which the kernel can drop and reread; what the process
-privately owns is 1.6 MiB against PgBouncer's 1.0. At small client counts
+privately owns is 1.5 MiB against PgBouncer's 1.0. At small client counts
 PgBouncer is the lighter process and will stay so.
 
 **CPU per query is level with PgBouncer from 8 clients and lower from 128.**
@@ -197,13 +233,15 @@ this table, from a 7-CPU machine, had gpoolproxy at 1.9× — but that is a
 statement about those cores, and these numbers are the ones measured for this
 code.
 
-**The binary is where pgx shows.** Of the 6.9 MB stripped, about 2.2 MB is
-`pgconn` and what it brings (`pgtype`, `database/sql`, `encoding/json`,
-`golang.org/x/text`), used once per server connection for the upstream
-handshake. A build with only `crypto/tls` and `net` is 4.7 MB, so that is the
-floor for a Go proxy that offers TLS. Getting there means a second, hand-written
-copy of the upstream handshake — SCRAM, TLS modes, connection-string parsing —
-and it has not been done.
+**The binary got a fifth smaller by dropping the client library.** With pgx
+doing the upstream login it was 6.9 MB stripped, of which about 2.2 MB was
+`pgconn` and what it brought (`pgtype`, `database/sql`, `encoding/json`,
+`golang.org/x/text`), used once per server connection. With the proxy's own
+login it is 5.5 MB, and the empty process is 1.2 MiB lighter. What is left is
+the Go runtime, `crypto/tls` and `net`; a Go program that only imports those is
+4.7 MB, so that is close to the floor for a Go proxy that offers TLS. The
+throughput and CPU tables above were measured before this change and re-checked
+after it at 1, 8, 128 and 3,000 clients, where nothing moved.
 
 **PgBouncer's own answer to the single core is `so_reuseport`** — several
 PgBouncer processes behind one port. That works, and it means each has its own
@@ -344,6 +382,10 @@ The dedicated connection is not counted in the pool's statistics.
 | `protocol.go` | wire-protocol constants and message classification |
 | `statements.go` | prepared statement tracking and replay across backends |
 | `driver.go` | `pooling.Driver` — dial, judge, clean up |
+| `upstream.go` | the server's connection string, parsed once |
+| `login.go` | logging in to PostgreSQL: TLS, startup, authentication |
+| `scram_client.go` | SCRAM-SHA-256, client half |
+| `wire.go` | encoders for the few messages the proxy composes itself |
 | `backend.go` | one server connection at the raw protocol level |
 | `scram.go` | SCRAM-SHA-256, server half |
 | `verifier.go` | PostgreSQL's stored-verifier format |

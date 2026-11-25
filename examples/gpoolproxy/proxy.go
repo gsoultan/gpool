@@ -17,8 +17,6 @@ import (
 
 	"github.com/gsoultan/gpool/pkg/gpool"
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // errClosing reports a client that finished authenticating after the proxy had
@@ -128,16 +126,15 @@ func NewProxy(config Config) (*Proxy, error) {
 		return nil, err
 	}
 
-	// Parsed once and cloned per connection. pgconn.ParseConfig re-reads the
-	// environment, service files and ~/.pgpass every call, which is not work to
-	// repeat for every backend the pool opens.
-	upstream, err := pgconn.ParseConfig(config.Upstream)
+	// Parsed once, here, so that a bad connection string stops the proxy from
+	// starting instead of failing every dial.
+	upstream, err := parseUpstream(config.Upstream)
 	if err != nil {
 		return nil, err
 	}
 
 	socks := newSockTable(descriptorLimit())
-	driver := &backendDriver{config: upstream, maxPrepared: config.MaxPreparedStatements, socks: socks}
+	driver := &backendDriver{upstream: upstream, maxPrepared: config.MaxPreparedStatements, socks: socks}
 	core, err := pooling.New(driver, config.Pool)
 	if err != nil {
 		return nil, err
@@ -597,15 +594,7 @@ func (p *Proxy) refuse(conn net.Conn) {
 	defer conn.Close()
 
 	_ = conn.SetWriteDeadline(time.Now().Add(cancelTimeout))
-	encoded, err := (&pgproto3.ErrorResponse{
-		Severity: "FATAL",
-		Code:     "53300", // too_many_connections
-		Message:  "too many clients already",
-	}).Encode(nil)
-	if err != nil {
-		return
-	}
-	_, _ = conn.Write(encoded)
+	_, _ = conn.Write(errorResponse("FATAL", "53300", "too many clients already"))
 }
 
 // register makes a session reachable by its cancellation key.

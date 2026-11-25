@@ -59,17 +59,36 @@ TLS clients are bridged through a socketpair by two goroutines, since
 Linux epoll is the tested path. kqueue compiles and has never been run. No
 Windows poller.
 
-## Taking a socket over from pgx
+## The upstream login is the proxy's own
 
-`pgconn.ConnectConfig` does the handshake (TLS, SCRAM, parameter collection),
-then `Hijack()` surrenders the socket. Reimplementing that handshake would mean a
-second, less tested copy of it.
+`upstream.go` parses a `postgres://` URL once; `login.go` dials, negotiates TLS,
+sends the startup packet and authenticates (SCRAM-SHA-256, MD5, cleartext);
+then the connection is taken over as a descriptor. No pgx in the binary — it is
+still a test dependency, as the client the tests drive the proxy with. pgx was
+dropped because it was 2.2 MB of a 6.9 MB binary for one handshake per
+connection.
 
-Sound only if pgx's own reader has nothing buffered, which
-`Frontend.ReadBufferLen()` reports — asserted rather than assumed, so a future
-pgx that reads ahead fails loudly instead of dropping a message into a client's
-result set. `pgproto3.Backend` offers no equivalent, which is why the *client*
-startup phase is parsed by hand rather than through it.
+Rules this code keeps, each with a test:
+
+- **Parse errors never quote the URL.** `url.Parse` errors do, and the URL holds
+  the password.
+- **SCRAM is verified both ways.** A server that says "ok" without a valid final
+  signature is refused (`login.finish`).
+- **Cleartext passwords only over TLS or a Unix socket**, refused before the
+  password is written.
+- **Lengths and iteration counts from the peer are bounded** before they become
+  allocations or PBKDF2 work.
+- **Nothing may be buffered past ReadyForQuery**, or it is lost in the takeover.
+- No SASLprep; ASCII passwords are unaffected.
+
+Deliberately not read: pgpass, service files, PG* env, keyword/value strings,
+multi-host. Do not add them back casually; each is a credential source the
+operator did not write down.
+
+**A TLS upstream costs double.** An encrypted server connection cannot be a bare
+descriptor, so it is bridged by goroutines: 112 µs/query against 47 at one
+client. `sslmode` defaults to `prefer`, which encrypts if the server offers.
+On the database host use the Unix socket or `sslmode=disable`.
 
 `ParameterStatus` values replayed to clients are captured from a real backend on
 first connect. Inventing them is a lie the proxy cannot keep consistent.
