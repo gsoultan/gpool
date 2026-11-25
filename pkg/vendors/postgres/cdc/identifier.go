@@ -6,7 +6,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
 )
 
 // SQLSTATE codes used to classify catalog errors. Matching on codes rather than on
@@ -63,7 +63,7 @@ func quoteLiteral(s string) string {
 
 // hasSQLState reports whether err carries any of the given SQLSTATE codes.
 func hasSQLState(err error, codes ...string) bool {
-	var pgErr *pgconn.PgError
+	var pgErr *wire.Error
 	if !errors.As(err, &pgErr) {
 		return false
 	}

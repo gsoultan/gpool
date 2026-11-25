@@ -3,12 +3,12 @@
 package cdc
 
 import (
+	"encoding/binary"
+	"errors"
+	"testing"
 	"time"
 
-	"testing"
-
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	"github.com/jackc/pglogrepl"
 )
 
 // committed is what pgoutput reports in the Begin that opens a transaction.
@@ -18,25 +18,47 @@ var committed = transaction{
 	committed: time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC),
 }
 
-func testRelation() *pglogrepl.RelationMessage {
-	return &pglogrepl.RelationMessage{
-		RelationID:   42,
-		Namespace:    "public",
-		RelationName: "users",
-		Columns: []*pglogrepl.RelationMessageColumn{
-			{Name: "id"},
-			{Name: "email"},
-			{Name: "bio"},
-		},
+func testRelation() *relation {
+	return &relation{namespace: "public", name: "users", columns: []string{"id", "email", "bio"}}
+}
+
+// tuple encodes columns as pgoutput sends them.
+func tuple(columns ...[]byte) []byte {
+	out := binary.BigEndian.AppendUint16(nil, uint16(len(columns)))
+	for _, column := range columns {
+		out = append(out, column...)
 	}
+	return out
 }
 
-func tuple(columns ...*pglogrepl.TupleDataColumn) *pglogrepl.TupleData {
-	return &pglogrepl.TupleData{ColumnNum: uint16(len(columns)), Columns: columns}
+func textColumn(value string) []byte {
+	out := binary.BigEndian.AppendUint32([]byte{tupleText}, uint32(len(value)))
+	return append(out, value...)
 }
 
-func textColumn(value string) *pglogrepl.TupleDataColumn {
-	return &pglogrepl.TupleDataColumn{DataType: tupleText, Data: []byte(value), Length: uint32(len(value))}
+var (
+	nullColumn      = []byte{tupleNull}
+	unchangedColumn = []byte{tupleUnchanged}
+)
+
+// decodeTuple decodes a lone tuple, failing the test if it is malformed.
+func decodeTuple(t *testing.T, rel *relation, data []byte) map[string]any {
+	t.Helper()
+	r := reader{data: data}
+	got := r.tuple(rel)
+	if r.err != nil {
+		t.Fatalf("tuple() = %v", r.err)
+	}
+	return got
+}
+
+// change encodes the part of a row change after its relation id.
+func change(parts ...[]byte) []byte {
+	var out []byte
+	for _, part := range parts {
+		out = append(out, part...)
+	}
+	return out
 }
 
 func TestDecodeTuple(t *testing.T) {
@@ -47,7 +69,7 @@ func TestDecodeTuple(t *testing.T) {
 	t.Run("text values are decoded", func(t *testing.T) {
 		t.Parallel()
 
-		got := decodeTuple(rel, tuple(
+		got := decodeTuple(t, rel, tuple(
 			textColumn("1"),
 			textColumn("a@example.com"),
 			textColumn("hello"),
@@ -60,9 +82,9 @@ func TestDecodeTuple(t *testing.T) {
 	t.Run("null is a present key with a nil value", func(t *testing.T) {
 		t.Parallel()
 
-		got := decodeTuple(rel, tuple(
+		got := decodeTuple(t, rel, tuple(
 			textColumn("1"),
-			&pglogrepl.TupleDataColumn{DataType: tupleNull},
+			nullColumn,
 			textColumn("hello"),
 		))
 
@@ -81,10 +103,10 @@ func TestDecodeTuple(t *testing.T) {
 	t.Run("unchanged toast is omitted, not nulled", func(t *testing.T) {
 		t.Parallel()
 
-		got := decodeTuple(rel, tuple(
+		got := decodeTuple(t, rel, tuple(
 			textColumn("1"),
 			textColumn("a@example.com"),
-			&pglogrepl.TupleDataColumn{DataType: tupleUnchanged},
+			unchangedColumn,
 		))
 
 		if _, present := got["bio"]; present {
@@ -95,11 +117,15 @@ func TestDecodeTuple(t *testing.T) {
 		}
 	})
 
-	t.Run("nil tuple decodes to nil", func(t *testing.T) {
+	// A value whose length runs past the message must end the stream, not be
+	// read out of whatever follows it in the buffer.
+	t.Run("a truncated tuple is malformed", func(t *testing.T) {
 		t.Parallel()
 
-		if got := decodeTuple(rel, nil); got != nil {
-			t.Fatalf("decodeTuple(nil) = %v, want nil", got)
+		data := tuple(textColumn("1"), textColumn("a@example.com"))
+		r := reader{data: data[:len(data)-3]}
+		if r.tuple(rel); !errors.Is(r.err, errMalformed) {
+			t.Fatalf("tuple() error = %v, want errMalformed", r.err)
 		}
 	})
 
@@ -108,7 +134,7 @@ func TestDecodeTuple(t *testing.T) {
 	t.Run("more tuple columns than the relation describes", func(t *testing.T) {
 		t.Parallel()
 
-		got := decodeTuple(rel, tuple(
+		got := decodeTuple(t, rel, tuple(
 			textColumn("1"),
 			textColumn("a@example.com"),
 			textColumn("hello"),
@@ -123,7 +149,7 @@ func TestDecodeTuple(t *testing.T) {
 	t.Run("fewer tuple columns than the relation describes", func(t *testing.T) {
 		t.Parallel()
 
-		got := decodeTuple(rel, tuple(textColumn("1")))
+		got := decodeTuple(t, rel, tuple(textColumn("1")))
 		assertColumns(t, got, map[string]any{"id": "1"})
 	})
 }
@@ -136,8 +162,8 @@ func TestDecodedMapsAreNotShared(t *testing.T) {
 
 	rel := testRelation()
 
-	first := decodeTuple(rel, tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")))
-	second := decodeTuple(rel, tuple(textColumn("2"), textColumn("b@example.com"), textColumn("y")))
+	first := decodeTuple(t, rel, tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")))
+	second := decodeTuple(t, rel, tuple(textColumn("2"), textColumn("b@example.com"), textColumn("y")))
 
 	if first["id"] != "1" || second["id"] != "2" {
 		t.Fatalf("maps alias each other: first=%v second=%v", first, second)
@@ -158,10 +184,9 @@ func TestDecodeOperations(t *testing.T) {
 	t.Run("insert", func(t *testing.T) {
 		t.Parallel()
 
-		event := decodeInsert(rel, &pglogrepl.InsertMessage{
-			RelationID: rel.RelationID,
-			Tuple:      tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
-		}, lsn, committed)
+		event := mustDecode(t, msgInsert, rel, change(
+			[]byte{tupleNew}, tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
+		), lsn)
 
 		assertHeader(t, event, cdc.OpInsert, lsn)
 		if event.Before != nil {
@@ -175,11 +200,10 @@ func TestDecodeOperations(t *testing.T) {
 	t.Run("update carries both images", func(t *testing.T) {
 		t.Parallel()
 
-		event := decodeUpdate(rel, &pglogrepl.UpdateMessage{
-			RelationID: rel.RelationID,
-			OldTuple:   tuple(textColumn("1"), textColumn("old@example.com"), textColumn("x")),
-			NewTuple:   tuple(textColumn("1"), textColumn("new@example.com"), textColumn("x")),
-		}, lsn, committed)
+		event := mustDecode(t, msgUpdate, rel, change(
+			[]byte{tupleOld}, tuple(textColumn("1"), textColumn("old@example.com"), textColumn("x")),
+			[]byte{tupleNew}, tuple(textColumn("1"), textColumn("new@example.com"), textColumn("x")),
+		), lsn)
 
 		assertHeader(t, event, cdc.OpUpdate, lsn)
 		if event.Before["email"] != "old@example.com" {
@@ -194,10 +218,9 @@ func TestDecodeOperations(t *testing.T) {
 	t.Run("update without an old tuple", func(t *testing.T) {
 		t.Parallel()
 
-		event := decodeUpdate(rel, &pglogrepl.UpdateMessage{
-			RelationID: rel.RelationID,
-			NewTuple:   tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
-		}, lsn, committed)
+		event := mustDecode(t, msgUpdate, rel, change(
+			[]byte{tupleNew}, tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
+		), lsn)
 
 		if event.Before != nil {
 			t.Errorf("Before = %v, want nil", event.Before)
@@ -207,10 +230,9 @@ func TestDecodeOperations(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		t.Parallel()
 
-		event := decodeDelete(rel, &pglogrepl.DeleteMessage{
-			RelationID: rel.RelationID,
-			OldTuple:   tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
-		}, lsn, committed)
+		event := mustDecode(t, msgDelete, rel, change(
+			[]byte{tupleKey}, tuple(textColumn("1"), textColumn("a@example.com"), textColumn("x")),
+		), lsn)
 
 		assertHeader(t, event, cdc.OpDelete, lsn)
 		if event.After != nil {
@@ -237,6 +259,15 @@ func TestOpString(t *testing.T) {
 			t.Errorf("Op(%d).String() = %q, want %q", op, got, want)
 		}
 	}
+}
+
+func mustDecode(t *testing.T, op byte, rel *relation, body []byte, lsn uint64) cdc.Event {
+	t.Helper()
+	event, err := decodeChange(op, rel, body, lsn, committed)
+	if err != nil {
+		t.Fatalf("decodeChange() = %v", err)
+	}
+	return event
 }
 
 func assertHeader(t *testing.T, event cdc.Event, op cdc.Op, lsn uint64) {

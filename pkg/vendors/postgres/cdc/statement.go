@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
 )
 
 // verifyTableSQL checks whether a table is covered by a publication. The schema
@@ -46,6 +46,7 @@ func dropPublicationSQL(name string) string {
 }
 
 // exec runs a statement that returns no rows, draining the result either way.
-func exec(ctx context.Context, conn *pgconn.PgConn, sql string) error {
-	return conn.Exec(ctx, sql).Close()
+func exec(ctx context.Context, conn *wire.Conn, sql string) error {
+	_, err := conn.Exec(ctx, sql)
+	return err
 }

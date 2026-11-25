@@ -4,59 +4,74 @@ package cdc
 
 import (
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	"github.com/jackc/pglogrepl"
 )
 
-// Column data-type markers used by the pgoutput protocol.
+// Column kinds in a pgoutput tuple.
 const (
 	tupleNull      = 'n' // SQL NULL
 	tupleText      = 't' // value present, in text format
 	tupleUnchanged = 'u' // TOASTed value that did not change, not transmitted
+	tupleBinary    = 'b' // value present, in binary format; never requested here
 )
 
-// decodeInsert converts an insert record into an event.
-func decodeInsert(rel *pglogrepl.RelationMessage, m *pglogrepl.InsertMessage, lsn uint64, tx transaction) cdc.Event {
-	return cdc.Event{
-		Op:          cdc.OpInsert,
-		Schema:      rel.Namespace,
-		Table:       rel.RelationName,
+// decodeChange decodes an Insert, Update or Delete message into an event. body
+// is what follows the relation id, which the caller read to find rel.
+//
+// The tuples are decoded straight from the message into the event's maps, with
+// no intermediate representation: the only allocations are the maps and the
+// values the consumer receives.
+func decodeChange(op byte, rel *relation, body []byte, lsn uint64, tx transaction) (cdc.Event, error) {
+	event := cdc.Event{
+		Schema:      rel.namespace,
+		Table:       rel.name,
 		Position:    position(lsn),
 		Timestamp:   tx.committed,
 		Transaction: tx.position,
-		After:       decodeTuple(rel, m.Tuple),
 	}
+	r := reader{data: body}
+	switch op {
+	case msgInsert:
+		event.Op = cdc.OpInsert
+		event.After = r.tupleAfter(rel, tupleNew)
+	case msgUpdate:
+		event.Op = cdc.OpUpdate
+		// Before is sent only for what the table's REPLICA IDENTITY covers, and
+		// not at all under the default identity unless the key changed.
+		kind := r.peek()
+		if kind == tupleKey || kind == tupleOld {
+			event.Before = r.tupleAfter(rel, kind)
+		}
+		event.After = r.tupleAfter(rel, tupleNew)
+	case msgDelete:
+		event.Op = cdc.OpDelete
+		kind := r.peek()
+		if kind != tupleKey && kind != tupleOld {
+			return cdc.Event{}, errMalformed
+		}
+		event.Before = r.tupleAfter(rel, kind)
+	}
+	return event, r.err
 }
 
-// decodeUpdate converts an update record into an event. Before is populated only
-// for the columns the table's REPLICA IDENTITY covers, and is nil under the default
-// identity unless the primary key changed.
-func decodeUpdate(rel *pglogrepl.RelationMessage, m *pglogrepl.UpdateMessage, lsn uint64, tx transaction) cdc.Event {
-	return cdc.Event{
-		Op:          cdc.OpUpdate,
-		Schema:      rel.Namespace,
-		Table:       rel.RelationName,
-		Position:    position(lsn),
-		Timestamp:   tx.committed,
-		Transaction: tx.position,
-		Before:      decodeTuple(rel, m.OldTuple),
-		After:       decodeTuple(rel, m.NewTuple),
+// peek returns the next byte without consuming it.
+func (r *reader) peek() byte {
+	if r.err != nil || len(r.data) == 0 {
+		r.err = errMalformed
+		return 0
 	}
+	return r.data[0]
 }
 
-// decodeDelete converts a delete record into an event.
-func decodeDelete(rel *pglogrepl.RelationMessage, m *pglogrepl.DeleteMessage, lsn uint64, tx transaction) cdc.Event {
-	return cdc.Event{
-		Op:          cdc.OpDelete,
-		Schema:      rel.Namespace,
-		Table:       rel.RelationName,
-		Position:    position(lsn),
-		Timestamp:   tx.committed,
-		Transaction: tx.position,
-		Before:      decodeTuple(rel, m.OldTuple),
+// tupleAfter reads the tuple that follows a marker byte, checking the marker.
+func (r *reader) tupleAfter(rel *relation, marker byte) map[string]any {
+	if r.byte() != marker {
+		r.err = errMalformed
+		return nil
 	}
+	return r.tuple(rel)
 }
 
-// decodeTuple converts a wire tuple into a column map.
+// tuple decodes a tuple into a column map.
 //
 // The map is freshly allocated per tuple and handed to the consumer outright. An
 // earlier design recycled these through a sync.Pool, which silently cleared the map
@@ -65,27 +80,41 @@ func decodeDelete(rel *pglogrepl.RelationMessage, m *pglogrepl.DeleteMessage, ls
 // Values are returned as strings, exactly as pgoutput transmits them in text
 // format; decoding to Go types would need the destination type, which the
 // replication stream does not carry.
-func decodeTuple(rel *pglogrepl.RelationMessage, tuple *pglogrepl.TupleData) map[string]any {
-	if tuple == nil {
+func (r *reader) tuple(rel *relation) map[string]any {
+	count := int(r.uint16())
+	if r.err != nil {
 		return nil
 	}
-
-	columns := min(len(tuple.Columns), len(rel.Columns))
-	data := make(map[string]any, columns)
-
-	for i := range columns {
-		col := tuple.Columns[i]
-		name := rel.Columns[i].Name
-
-		switch col.DataType {
+	data := make(map[string]any, min(count, len(rel.columns)))
+	for i := range count {
+		kind := r.byte()
+		var value []byte
+		if kind == tupleText || kind == tupleBinary {
+			value = r.take(int(int32(r.uint32())))
+		}
+		if r.err != nil {
+			return nil
+		}
+		if i >= len(rel.columns) {
+			// More columns than the relation named: a table altered since its
+			// Relation message would be sent a new one first, so this is
+			// tolerated the way the earlier decoder tolerated it, by dropping
+			// what cannot be named.
+			continue
+		}
+		name := rel.columns[i]
+		switch kind {
 		case tupleNull:
 			data[name] = nil
-		case tupleText:
-			data[name] = string(col.Data)
+		case tupleText, tupleBinary:
+			data[name] = string(value)
 		case tupleUnchanged:
 			// A TOASTed value that did not change is not sent. Recording it as nil
 			// would be indistinguishable from a real NULL and would blank the column
 			// in any consumer replaying the event, so the key is omitted instead.
+		default:
+			r.err = errMalformed
+			return nil
 		}
 	}
 	return data

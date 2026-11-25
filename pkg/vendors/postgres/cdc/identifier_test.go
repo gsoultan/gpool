@@ -8,7 +8,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
 )
 
 func TestQuoteIdentifier(t *testing.T) {
@@ -128,28 +128,28 @@ func TestErrorClassificationUsesSQLState(t *testing.T) {
 	}{
 		{
 			name:          "duplicate object",
-			err:           &pgconn.PgError{Code: codeDuplicateObject, Message: "publication already exists"},
+			err:           &wire.Error{Code: codeDuplicateObject, Message: "publication already exists"},
 			wantDuplicate: true,
 		},
 		{
 			name:          "duplicate table",
-			err:           &pgconn.PgError{Code: codeDuplicateTable},
+			err:           &wire.Error{Code: codeDuplicateTable},
 			wantDuplicate: true,
 		},
 		{
 			name:          "undefined object",
-			err:           &pgconn.PgError{Code: codeUndefinedObject},
+			err:           &wire.Error{Code: codeUndefinedObject},
 			wantUndefined: true,
 		},
 		{
 			name: "wrapped error is still classified",
 			err: fmt.Errorf("creating publication: %w",
-				&pgconn.PgError{Code: codeDuplicateObject}),
+				&wire.Error{Code: codeDuplicateObject}),
 			wantDuplicate: true,
 		},
 		{
 			name: "localised message without a matching code",
-			err:  &pgconn.PgError{Code: "42501", Message: "permiso denegado"},
+			err:  &wire.Error{Code: "42501", Message: "permiso denegado"},
 		},
 		{
 			name: "plain error",
