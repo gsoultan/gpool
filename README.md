@@ -314,9 +314,9 @@ additionally needs ownership of the tables.
 > `replication=database`, enters `CopyBoth` after `START_REPLICATION`, and stays there for the life
 > of the subscription — there is no transaction boundary at which a connection could be handed
 > back, and a slot admits one active walsender at a time. It is inherently session-scoped, and
-> PgBouncer does not proxy replication connections at all. Point the subscriber at the database
-> directly, not at a pooler — or at one that passes replication connections through unpooled, as
-> PgBouncer 1.23+ and `examples/gpoolproxy -max-replication` do.
+> no pooler can multiplex it. Point the subscriber at the database directly, or at a pooler that
+> passes replication connections through unpooled, one server connection per client, as PgBouncer
+> 1.23+ and `examples/gpoolproxy -max-replication` do.
 >
 > The subscriber's *control* connection — publication DDL and `pg_publication_tables` lookups — is
 > an ordinary connection issuing discrete statements with unnamed parameter binding, so it holds no
