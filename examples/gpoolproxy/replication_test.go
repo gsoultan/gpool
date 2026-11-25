@@ -5,16 +5,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // requireLogical skips a test on a server that cannot decode its WAL.
@@ -25,14 +22,14 @@ func requireLogical(t *testing.T) {
 	if url == "" {
 		t.Skip("DATABASE_URL not set")
 	}
-	conn, err := pgx.Connect(t.Context(), url)
+	conn, err := dialClient(t.Context(), url)
 	if err != nil {
-		t.Fatalf("Connect() = %v", err)
+		t.Fatalf("dialClient() = %v", err)
 	}
-	defer conn.Close(context.Background())
+	defer conn.close()
 
-	var level string
-	if err := conn.QueryRow(t.Context(), "SHOW wal_level").Scan(&level); err != nil {
+	level, err := conn.value("SHOW wal_level")
+	if err != nil {
 		t.Fatalf("SHOW wal_level = %v", err)
 	}
 	if level != "logical" {
@@ -41,26 +38,12 @@ func requireLogical(t *testing.T) {
 }
 
 // replicationConn connects through the proxy asking for logical replication.
-func replicationConn(t *testing.T, url string) (*pgconn.PgConn, error) {
+func replicationConn(t *testing.T, url string) (*wireClient, error) {
 	t.Helper()
-
-	config, err := pgconn.ParseConfig(url)
-	if err != nil {
-		t.Fatalf("ParseConfig() = %v", err)
-	}
-	config.RuntimeParams["replication"] = "database"
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	return pgconn.ConnectConfig(ctx, config)
-}
-
-func sqlState(err error) string {
-	var serverErr *pgconn.PgError
-	if errors.As(err, &serverErr) {
-		return serverErr.Code
-	}
-	return ""
+	return dialClient(ctx, url, [2]string{"replication", "database"})
 }
 
 // TestReplicationClientStreamsThroughADedicatedConnection is the feature.
@@ -83,54 +66,48 @@ func TestReplicationClientStreamsThroughADedicatedConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replication connect = %v", err)
 	}
-	defer stream.Close(context.Background())
+	defer stream.close()
 
-	if _, err := stream.Exec(t.Context(), "IDENTIFY_SYSTEM").ReadAll(); err != nil {
+	if _, err := stream.simple("IDENTIFY_SYSTEM"); err != nil {
 		t.Fatalf("IDENTIFY_SYSTEM = %v", err)
 	}
 
 	slot := fmt.Sprintf("gpoolproxy_test_%d", time.Now().UnixNano())
 	create := fmt.Sprintf("CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL test_decoding", slot)
-	if _, err := stream.Exec(t.Context(), create).ReadAll(); err != nil {
+	if _, err := stream.simple(create); err != nil {
 		t.Fatalf("CREATE_REPLICATION_SLOT = %v", err)
 	}
 
 	// An ordinary client on the one pooled connection, while the stream's
 	// session is alive and holding its own.
-	client, err := pgx.Connect(t.Context(), url)
-	if err != nil {
-		t.Fatalf("Connect() = %v", err)
-	}
-	defer client.Close(context.Background())
+	client := connect(t, url)
 
 	table := slot + "_t"
-	if _, err := client.Exec(t.Context(), "CREATE TABLE "+table+" (id int PRIMARY KEY)"); err != nil {
+	if _, err := client.query("CREATE TABLE " + table + " (id int PRIMARY KEY)"); err != nil {
 		t.Fatalf("CREATE TABLE = %v", err)
 	}
-	defer client.Exec(context.Background(), "DROP TABLE "+table)
+	defer client.query("DROP TABLE " + table)
 
-	frontend := stream.Frontend()
-	frontend.SendQuery(&pgproto3.Query{String: fmt.Sprintf("START_REPLICATION SLOT %s LOGICAL 0/0", slot)})
-	if err := frontend.Flush(); err != nil {
+	stream.timeout = 20 * time.Second
+	if err := stream.send(frontendQuery(fmt.Sprintf("START_REPLICATION SLOT %s LOGICAL 0/0", slot))); err != nil {
 		t.Fatalf("START_REPLICATION = %v", err)
 	}
 
-	if _, err := client.Exec(t.Context(), "INSERT INTO "+table+" VALUES (4242)"); err != nil {
+	if _, err := client.query("INSERT INTO " + table + " VALUES (4242)"); err != nil {
 		t.Fatalf("INSERT = %v", err)
 	}
 
-	stream.Conn().SetDeadline(time.Now().Add(20 * time.Second))
 	want := []byte("id[integer]:4242")
 	for seen := false; !seen; {
-		message, err := frontend.Receive()
+		kind, body, err := stream.receive()
 		if err != nil {
-			t.Fatalf("Receive() = %v", err)
+			t.Fatalf("receive() = %v", err)
 		}
-		switch message := message.(type) {
-		case *pgproto3.ErrorResponse:
-			t.Fatalf("server error %s: %s", message.Code, message.Message)
-		case *pgproto3.CopyData:
-			seen = bytes.Contains(message.Data, want)
+		switch kind {
+		case msgErrorResponse:
+			t.Fatalf("server error: %v", parseServerError(body))
+		case 'd':
+			seen = bytes.Contains(body, want)
 		}
 	}
 
@@ -139,17 +116,15 @@ func TestReplicationClientStreamsThroughADedicatedConnection(t *testing.T) {
 	// which only arrives if both made it through.
 	status := make([]byte, 34)
 	status[0] = 'r'
-	frontend.Send(&pgproto3.CopyData{Data: status})
-	frontend.Send(&pgproto3.CopyDone{})
-	if err := frontend.Flush(); err != nil {
+	if err := stream.send(appendMessage(nil, 'd', status), appendMessage(nil, 'c')); err != nil {
 		t.Fatalf("CopyDone = %v", err)
 	}
 	for ready := false; !ready; {
-		message, err := frontend.Receive()
+		kind, _, err := stream.receive()
 		if err != nil {
-			t.Fatalf("Receive() after CopyDone = %v", err)
+			t.Fatalf("receive() after CopyDone = %v", err)
 		}
-		_, ready = message.(*pgproto3.ReadyForQuery)
+		ready = kind == 'Z'
 	}
 }
 
@@ -162,7 +137,7 @@ func TestReplicationIsRefusedUnlessEnabled(t *testing.T) {
 
 	conn, err := replicationConn(t, url)
 	if err == nil {
-		conn.Close(context.Background())
+		conn.close()
 		t.Fatal("replication connect succeeded on a proxy that does not allow it")
 	}
 	if code := sqlState(err); code != "0A000" {
@@ -190,14 +165,14 @@ func TestReplicationClientsAreBoundedAndTheirPlaceComesBack(t *testing.T) {
 
 	second, err := replicationConn(t, url)
 	if err == nil {
-		second.Close(context.Background())
+		second.close()
 		t.Fatal("second replication connect succeeded past a limit of one")
 	}
 	if code := sqlState(err); code != "53300" {
 		t.Fatalf("SQLSTATE = %q (%v), want 53300", code, err)
 	}
 
-	first.Close(context.Background())
+	first.close()
 
 	// The proxy learns of the disconnect from its event loop, not from Close
 	// returning here.
@@ -205,7 +180,7 @@ func TestReplicationClientsAreBoundedAndTheirPlaceComesBack(t *testing.T) {
 	for {
 		third, err := replicationConn(t, url)
 		if err == nil {
-			third.Close(context.Background())
+			third.close()
 			return
 		}
 		if time.Now().After(deadline) {
@@ -222,37 +197,29 @@ func TestLogicalChangesCanBePolledInTransactionMode(t *testing.T) {
 	requireLogical(t)
 
 	url := startProxy(t, pooling.Config{MaxConns: 1})
-	conn, err := pgx.Connect(t.Context(), url)
-	if err != nil {
-		t.Fatalf("Connect() = %v", err)
-	}
-	defer conn.Close(context.Background())
+	conn := connect(t, url)
 
 	slot := fmt.Sprintf("gpoolproxy_poll_%d", time.Now().UnixNano())
 	table := slot + "_t"
-	if _, err := conn.Exec(t.Context(), "SELECT pg_create_logical_replication_slot($1, 'test_decoding')", slot); err != nil {
+	if _, err := conn.query("SELECT pg_create_logical_replication_slot($1, 'test_decoding')", slot); err != nil {
 		t.Fatalf("create slot = %v", err)
 	}
-	defer conn.Exec(context.Background(), "SELECT pg_drop_replication_slot($1)", slot)
+	defer conn.query("SELECT pg_drop_replication_slot($1)", slot)
 
-	if _, err := conn.Exec(t.Context(), "CREATE TABLE "+table+" (id int PRIMARY KEY)"); err != nil {
+	if _, err := conn.query("CREATE TABLE " + table + " (id int PRIMARY KEY)"); err != nil {
 		t.Fatalf("CREATE TABLE = %v", err)
 	}
-	defer conn.Exec(context.Background(), "DROP TABLE "+table)
-	if _, err := conn.Exec(t.Context(), "INSERT INTO "+table+" VALUES (7)"); err != nil {
+	defer conn.query("DROP TABLE " + table)
+	if _, err := conn.query("INSERT INTO " + table + " VALUES (7)"); err != nil {
 		t.Fatalf("INSERT = %v", err)
 	}
 
-	rows, err := conn.Query(t.Context(), "SELECT data FROM pg_logical_slot_get_changes($1, NULL, NULL)", slot)
+	changes, err := conn.query("SELECT data FROM pg_logical_slot_get_changes($1, NULL, NULL)", slot)
 	if err != nil {
 		t.Fatalf("get_changes = %v", err)
 	}
-	changes, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		t.Fatalf("CollectRows() = %v", err)
-	}
 	for _, change := range changes {
-		if bytes.Contains([]byte(change), []byte("id[integer]:7")) {
+		if strings.Contains(change[0], "id[integer]:7") {
 			return
 		}
 	}

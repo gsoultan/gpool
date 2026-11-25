@@ -22,8 +22,8 @@ statistics) applies unchanged, and the whole vendor half is `driver.go`, five
 methods.
 
 **Cross-application pooling works.** `TestProxyBoundsBackendsAcrossIndependentClients`
-runs twelve separate `pgxpool` instances — twelve applications — with five
-connections each, and asserts PostgreSQL never sees more than the four backends
+holds sixty client connections open at once — twelve applications with five
+connections each — and asserts PostgreSQL never sees more than the four backends
 the proxy was told to open:
 
 ```
@@ -239,9 +239,22 @@ doing the upstream login it was 6.9 MB stripped, of which about 2.2 MB was
 `golang.org/x/text`), used once per server connection. With the proxy's own
 login it is 5.5 MB, and the empty process is 1.2 MiB lighter. What is left is
 the Go runtime, `crypto/tls` and `net`; a Go program that only imports those is
-4.7 MB, so that is close to the floor for a Go proxy that offers TLS. The
-throughput and CPU tables above were measured before this change and re-checked
-after it at 1, 8, 128 and 3,000 clients, where nothing moved.
+4.7 MB, so that is close to the floor for a Go proxy that offers TLS.
+
+**No PostgreSQL driver is left anywhere in this module**, tests included. The
+tests and the benchmark connect with `wireClient` in `client_test.go`, which is
+the proxy's own login and a few hand-written messages; `go.mod` requires only
+the core module, for `pkg/pooling`, and there is no `go.sum` because nothing is
+fetched. The core module itself still requires pgx and pglogrepl for its
+PostgreSQL vendor, so `go list -m all` names them here, but none of their code
+is compiled into the proxy or its tests. `psql` is run as a program by one test,
+so that a client the proxy did not write still has to accept it.
+
+The throughput and CPU tables above were measured with pgx as the load
+generator, before the benchmark moved to that client. Six passes with the new
+one, on the same host on a noisier day, gave the same picture — 0.88× of
+PgBouncer at one client, level at 8 and 32, and 1.2× to 1.5× from 128 clients
+up — so the tables stand rather than being replaced by a noisier run.
 
 **PgBouncer's own answer to the single core is `so_reuseport`** — several
 PgBouncer processes behind one port. That works, and it means each has its own
@@ -390,3 +403,4 @@ The dedicated connection is not counted in the pool's statistics.
 | `scram.go` | SCRAM-SHA-256, server half |
 | `verifier.go` | PostgreSQL's stored-verifier format |
 | `userlist.go` | credentials file |
+| `client_test.go` | the client the tests and the benchmark drive the proxy with |

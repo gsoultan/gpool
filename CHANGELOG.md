@@ -60,6 +60,19 @@ reason and the migration.
   are no longer read. A cleartext password is refused unless the connection is
   TLS or a Unix socket, and the password is not passed through SASLprep.
 
+- **`examples/gpoolproxy` has no PostgreSQL driver in its tests either, or in
+  its `go.mod`.** pgx had stayed on as the client the tests and the benchmark
+  connected with. They now use `wireClient` in `client_test.go`: the proxy's
+  own login, and the extended-protocol messages written out by hand, which
+  also lets a test send exactly the bytes it means to. The module requires
+  nothing but the core module, has no `go.sum`, and builds and tests with an
+  empty module cache and no network. `TestModuleDependsOnNoPostgreSQLDriver`
+  keeps it that way, and `TestProxyServesPsql` runs `psql` as a program so that
+  one client the proxy did not write still vouches for it.
+
+  The benchmark's load generator changed with it. Six passes with the new one
+  agree with the published comparison against PgBouncer, which stands.
+
 - **`examples/gpoolproxy` is an event loop over raw sockets rather than two
   goroutines per client.** A client costs a descriptor and about a kilobyte once
   it has authenticated: its socket is registered with one shared epoll instance,

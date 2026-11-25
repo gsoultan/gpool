@@ -11,7 +11,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -24,9 +23,6 @@ import (
 	"time"
 
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // These tests are for what the event loop made possible to get wrong. A session
@@ -55,35 +51,30 @@ func TestProxyServesMoreClientsThanBackendsWithoutLosingOne(t *testing.T) {
 	)
 	url := startProxy(t, pooling.Config{MaxConns: backends})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-
 	var wg sync.WaitGroup
 	failures := make(chan error, clients)
 	for client := range clients {
 		wg.Go(func() {
-			conn, err := pgx.Connect(ctx, url)
+			conn, err := dialClient(context.Background(), url)
 			if err != nil {
 				failures <- fmt.Errorf("client %d: connect: %w", client, err)
 				return
 			}
-			defer conn.Close(context.Background())
-
-			pipeline := conn.PgConn().StartPipeline(ctx)
-			defer pipeline.Close()
+			defer conn.close()
 
 			for round := range rounds {
 				first, second := client*rounds*2+round*2, client*rounds*2+round*2+1
+				// Two batches, each in a write of its own, and neither answer
+				// read until both are sent.
 				for _, value := range []int{first, second} {
-					pipeline.SendQueryParams("SELECT $1::int4", [][]byte{[]byte(strconv.Itoa(value))}, nil, nil, nil)
-					pipeline.SendPipelineSync()
-					if err := pipeline.Flush(); err != nil {
-						failures <- fmt.Errorf("client %d, round %d: flush: %w", client, round, err)
+					batch := append(frontendBatch("", "SELECT $1::int4", value), frontendSync())
+					if err := conn.send(batch...); err != nil {
+						failures <- fmt.Errorf("client %d, round %d: send: %w", client, round, err)
 						return
 					}
 				}
 				for _, want := range []int{first, second} {
-					got, err := pipelinedAnswer(pipeline)
+					got, err := pipelinedAnswer(conn)
 					if err != nil {
 						failures <- fmt.Errorf("client %d, round %d: %w", client, round, err)
 						return
@@ -104,28 +95,13 @@ func TestProxyServesMoreClientsThanBackendsWithoutLosingOne(t *testing.T) {
 	}
 }
 
-// pipelinedAnswer reads one single-value result and the sync that follows it.
-func pipelinedAnswer(pipeline *pgconn.Pipeline) (string, error) {
-	results, err := pipeline.GetResults()
+// pipelinedAnswer reads one single-value result up to the boundary after it.
+func pipelinedAnswer(conn *wireClient) (string, error) {
+	rows, err := conn.untilReady()
 	if err != nil {
 		return "", err
 	}
-	reader, ok := results.(*pgconn.ResultReader)
-	if !ok {
-		return "", fmt.Errorf("pipeline returned %T, want a result", results)
-	}
-	result := reader.Read()
-	if result.Err != nil {
-		return "", result.Err
-	}
-	if len(result.Rows) != 1 || len(result.Rows[0]) != 1 {
-		return "", fmt.Errorf("pipeline returned %d rows, want one value", len(result.Rows))
-	}
-
-	if _, err := pipeline.GetResults(); err != nil {
-		return "", err
-	}
-	return string(result.Rows[0][0]), nil
+	return single(rows)
 }
 
 // A backend was handed on as soon as a ReadyForQuery arrived with nothing
@@ -141,37 +117,16 @@ func pipelinedAnswer(pipeline *pgconn.Pipeline) (string, error) {
 func TestProxyKeepsTheBackendForABatchThatArrivesInTwoSegments(t *testing.T) {
 	url := startProxy(t, pooling.Config{MaxConns: 1})
 
-	config, err := pgconn.ParseConfig(url)
-	if err != nil {
-		t.Fatalf("ParseConfig() = %v", err)
-	}
-	conn, err := pgconn.ConnectConfig(t.Context(), config)
-	if err != nil {
-		t.Fatalf("ConnectConfig() = %v", err)
-	}
-	raw, err := conn.Hijack()
-	if err != nil {
-		t.Fatalf("Hijack() = %v", err)
-	}
-	defer raw.Conn.Close()
-	_ = raw.Conn.SetDeadline(time.Now().Add(30 * time.Second))
-
-	batch := func(sql string) []pgproto3.FrontendMessage {
-		return []pgproto3.FrontendMessage{
-			&pgproto3.Parse{Query: sql},
-			&pgproto3.Bind{},
-			&pgproto3.Execute{},
-		}
-	}
+	raw := connect(t, url)
+	raw.timeout = 30 * time.Second
 
 	// The whole first batch, and the second up to but not including its Sync.
-	for _, message := range append(append(batch("SELECT 'first'"), &pgproto3.Sync{}), batch("SELECT 'second'")...) {
-		raw.Frontend.Send(message)
+	opening := append(frontendBatch("", "SELECT 'first'"), frontendSync())
+	opening = append(opening, frontendBatch("", "SELECT 'second'")...)
+	if err := raw.send(opening...); err != nil {
+		t.Fatalf("send = %v", err)
 	}
-	if err := raw.Frontend.Flush(); err != nil {
-		t.Fatalf("Flush() = %v", err)
-	}
-	if rows := readUntilReady(t, raw.Frontend); !rowsEqual(rows, "first") {
+	if rows := readUntilReady(t, raw); !rowsEqual(rows, "first") {
 		t.Fatalf("first batch returned %q, want [first]", rows)
 	}
 
@@ -179,15 +134,15 @@ func TestProxyKeepsTheBackendForABatchThatArrivesInTwoSegments(t *testing.T) {
 	// can only be served by taking the one the first client is part-way through.
 	intruder := make(chan error, 1)
 	go func() {
-		other, err := pgx.Connect(context.Background(), url)
+		other, err := dialClient(context.Background(), url)
 		if err != nil {
 			intruder <- err
 			return
 		}
-		defer other.Close(context.Background())
+		defer other.close()
 
-		var got string
-		if err := other.QueryRow(context.Background(), "SELECT 'intruder'").Scan(&got); err != nil {
+		got, err := other.value("SELECT 'intruder'")
+		if err != nil {
 			intruder <- err
 			return
 		}
@@ -203,11 +158,10 @@ func TestProxyKeepsTheBackendForABatchThatArrivesInTwoSegments(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	raw.Frontend.Send(&pgproto3.Sync{})
-	if err := raw.Frontend.Flush(); err != nil {
-		t.Fatalf("Flush() = %v", err)
+	if err := raw.send(frontendSync()); err != nil {
+		t.Fatalf("send = %v", err)
 	}
-	if rows := readUntilReady(t, raw.Frontend); !rowsEqual(rows, "second") {
+	if rows := readUntilReady(t, raw); !rowsEqual(rows, "second") {
 		t.Fatalf("second batch returned %q, want [second]", rows)
 	}
 
@@ -223,24 +177,18 @@ func TestProxyKeepsTheBackendForABatchThatArrivesInTwoSegments(t *testing.T) {
 
 // readUntilReady collects the first column of every DataRow up to the next
 // ReadyForQuery.
-func readUntilReady(t *testing.T, frontend *pgproto3.Frontend) []string {
+func readUntilReady(t *testing.T, conn *wireClient) []string {
 	t.Helper()
 
-	var rows []string
-	for {
-		message, err := frontend.Receive()
-		if err != nil {
-			t.Fatalf("Receive() = %v", err)
-		}
-		switch message := message.(type) {
-		case *pgproto3.DataRow:
-			rows = append(rows, string(message.Values[0]))
-		case *pgproto3.ErrorResponse:
-			t.Fatalf("server error: %s (%s)", message.Message, message.Code)
-		case *pgproto3.ReadyForQuery:
-			return rows
-		}
+	rows, err := conn.untilReady()
+	if err != nil {
+		t.Fatalf("untilReady() = %v", err)
 	}
+	first := make([]string, 0, len(rows))
+	for _, row := range rows {
+		first = append(first, row[0])
+	}
+	return first
 }
 
 func rowsEqual(got []string, want ...string) bool {
@@ -257,31 +205,27 @@ func TestProxyRelaysRowsLargerThanItsBuffer(t *testing.T) {
 	const rows = 40
 	size := readBufSize*3 + 17
 
-	result, err := conn.Query(t.Context(),
+	result, err := conn.query(
 		"SELECT n, repeat(chr(65 + n % 26), $1::int) FROM generate_series(1, $2::int) AS n", size, rows)
 	if err != nil {
-		t.Fatalf("Query() = %v", err)
+		t.Fatalf("query = %v", err)
 	}
-	defer result.Close()
 
 	seen := 0
-	for result.Next() {
-		var n int
-		var payload string
-		if err := result.Scan(&n, &payload); err != nil {
-			t.Fatalf("Scan() = %v", err)
+	for _, row := range result {
+		n, err := strconv.Atoi(row[0])
+		if err != nil {
+			t.Fatalf("row number = %v", err)
 		}
+		payload := row[1]
 		seen++
 		if n != seen {
 			t.Fatalf("row %d arrived as row %d", n, seen)
 		}
 		want := strings.Repeat(string(rune('A'+n%26)), size)
 		if payload != want {
-			t.Fatalf("row %d: %d bytes, starting %q; want %d of %q", n, len(payload), payload[:1], size, want[:1])
+			t.Fatalf("row %d: %d bytes, starting %.1q; want %d of %q", n, len(payload), payload, size, want[:1])
 		}
-	}
-	if err := result.Err(); err != nil {
-		t.Fatalf("rows = %v", err)
 	}
 	if seen != rows {
 		t.Fatalf("got %d rows, want %d", seen, rows)
@@ -296,23 +240,26 @@ func TestProxyRelaysParametersLargerThanItsBuffer(t *testing.T) {
 
 	// Once unnamed and once through a named prepared statement. The second is
 	// a Bind the proxy has to read whole before it can forward it.
-	for name, url := range map[string]string{"unnamed": url, "named": cachingURL(url)} {
+	for name, named := range map[string]bool{"unnamed": false, "named": true} {
 		t.Run(name, func(t *testing.T) {
 			conn := connect(t, url)
+			if named {
+				conn.caching()
+			}
 
 			for range 2 {
-				var length int
-				var digest string
-				if err := conn.QueryRow(t.Context(), "SELECT length($1::bytea), md5($1::bytea)", payload).Scan(&length, &digest); err != nil {
-					t.Fatalf("QueryRow() = %v", err)
+				rows, err := conn.query("SELECT length($1::bytea), md5($1::bytea)", payload)
+				if err != nil || len(rows) != 1 {
+					t.Fatalf("query = %d rows, %v", len(rows), err)
 				}
-				if length != len(payload) {
-					t.Fatalf("server received %d bytes, want %d", length, len(payload))
+				length, digest := rows[0][0], rows[0][1]
+				if length != strconv.Itoa(len(payload)) {
+					t.Fatalf("server received %s bytes, want %d", length, len(payload))
 				}
 
-				var want string
-				if err := conn.QueryRow(t.Context(), "SELECT md5(repeat('0123456789abcdef', $1::int)::bytea)", readBufSize/4).Scan(&want); err != nil {
-					t.Fatalf("QueryRow() = %v", err)
+				want, err := conn.value("SELECT md5(repeat('0123456789abcdef', $1::int)::bytea)", readBufSize/4)
+				if err != nil {
+					t.Fatalf("query = %v", err)
 				}
 				if digest != want {
 					t.Fatalf("server received different bytes: md5 %s, want %s", digest, want)
@@ -330,34 +277,35 @@ func TestProxyRelaysCopyIn(t *testing.T) {
 	conn := connect(t, startProxy(t, pooling.Config{MaxConns: 1}))
 
 	const rows = 20_000
-	source := make([][]any, rows)
-	for i := range source {
-		source[i] = []any{i, strings.Repeat("x", 200)}
-	}
+	payload := strings.Repeat("x", 200)
 
-	tx, err := conn.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("Begin() = %v", err)
+	if _, err := conn.query("BEGIN"); err != nil {
+		t.Fatalf("BEGIN = %v", err)
 	}
-	defer tx.Rollback(context.Background())
+	defer conn.query("ROLLBACK")
 
-	if _, err := tx.Exec(t.Context(), "CREATE TEMP TABLE gpoolproxy_copy (id int, payload text) ON COMMIT DROP"); err != nil {
+	if _, err := conn.query("CREATE TEMP TABLE gpoolproxy_copy (id int, payload text) ON COMMIT DROP"); err != nil {
 		t.Fatalf("CREATE TEMP TABLE = %v", err)
 	}
-	copied, err := tx.CopyFrom(t.Context(), pgx.Identifier{"gpoolproxy_copy"}, []string{"id", "payload"}, pgx.CopyFromRows(source))
+
+	sent := 0
+	err := conn.copyIn("COPY gpoolproxy_copy (id, payload) FROM STDIN", func() (string, bool) {
+		if sent == rows {
+			return "", false
+		}
+		sent++
+		return copyLine(strconv.Itoa(sent), payload), true
+	})
 	if err != nil {
-		t.Fatalf("CopyFrom() = %v", err)
-	}
-	if copied != rows {
-		t.Fatalf("CopyFrom() copied %d rows, want %d", copied, rows)
+		t.Fatalf("copyIn() = %v", err)
 	}
 
-	var count, total int
-	if err := tx.QueryRow(t.Context(), "SELECT count(*), sum(length(payload)) FROM gpoolproxy_copy").Scan(&count, &total); err != nil {
-		t.Fatalf("QueryRow() = %v", err)
+	result, err := conn.query("SELECT count(*), sum(length(payload)) FROM gpoolproxy_copy")
+	if err != nil || len(result) != 1 {
+		t.Fatalf("query = %d rows, %v", len(result), err)
 	}
-	if count != rows || total != rows*200 {
-		t.Fatalf("table holds %d rows and %d bytes, want %d and %d", count, total, rows, rows*200)
+	if count, total := result[0][0], result[0][1]; count != strconv.Itoa(rows) || total != strconv.Itoa(rows*200) {
+		t.Fatalf("table holds %s rows and %s bytes, want %d and %d", count, total, rows, rows*200)
 	}
 }
 
@@ -372,15 +320,15 @@ func TestProxyServesTLSClients(t *testing.T) {
 	})
 	conn := connect(t, strings.Replace(url, "sslmode=disable", "sslmode=require", 1))
 
-	if state, ok := conn.PgConn().Conn().(interface{ Handshake() error }); !ok || state.Handshake() != nil {
+	if !conn.login.encrypted {
 		t.Fatal("the client connection is not TLS, so this did not test the bridge")
 	}
 
 	// Small, then large enough to need several records each way.
 	for _, size := range []int{1, readBufSize * 2} {
-		var got string
-		if err := conn.QueryRow(t.Context(), "SELECT repeat('t', $1::int)", size).Scan(&got); err != nil {
-			t.Fatalf("QueryRow(%d) = %v", size, err)
+		got, err := conn.value("SELECT repeat('t', $1::int)", size)
+		if err != nil {
+			t.Fatalf("query(%d) = %v", size, err)
 		}
 		if len(got) != size {
 			t.Fatalf("got %d bytes, want %d", len(got), size)
@@ -433,29 +381,27 @@ func TestProxyCancelsARunningQuery(t *testing.T) {
 
 	finished := make(chan error, 1)
 	go func() {
-		_, err := conn.Exec(context.Background(), "SELECT pg_sleep(30)")
+		_, err := conn.query("SELECT pg_sleep(30)")
 		finished <- err
 	}()
 
 	// Long enough for the query to be on a backend, which is what a
 	// cancellation is translated against.
 	time.Sleep(300 * time.Millisecond)
-	if err := conn.PgConn().CancelRequest(t.Context()); err != nil {
-		t.Fatalf("CancelRequest() = %v", err)
+	if err := conn.cancel(t.Context()); err != nil {
+		t.Fatalf("cancel() = %v", err)
 	}
 
 	select {
 	case err := <-finished:
-		var serverErr *pgconn.PgError
-		if !errors.As(err, &serverErr) || serverErr.Code != "57014" {
+		if sqlState(err) != "57014" {
 			t.Fatalf("the query ended with %v, want SQLSTATE 57014 (query_canceled)", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the query was still running ten seconds after it was cancelled")
 	}
 
-	var answer int
-	if err := conn.QueryRow(t.Context(), "SELECT 7").Scan(&answer); err != nil || answer != 7 {
+	if answer, err := conn.number("SELECT 7"); err != nil || answer != 7 {
 		t.Fatalf("the session after a cancellation: got %d, %v", answer, err)
 	}
 }

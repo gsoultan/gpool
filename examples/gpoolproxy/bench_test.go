@@ -11,8 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Comparative benchmarks against a running PgBouncer and a running gpoolproxy.
@@ -88,32 +86,25 @@ func BenchmarkThroughput(b *testing.B) {
 func benchmarkTarget(b *testing.B, url string, clients int, proxy *process) {
 	b.Helper()
 
-	config, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		b.Fatalf("ParseConfig() = %v", err)
-	}
-	// Client-side capacity matches the client count so a queue on this side does
-	// not get counted as proxy latency.
-	config.MaxConns = int32(clients)
-	config.MinConns = int32(clients)
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		b.Fatalf("pgxpool.NewWithConfig() = %v", err)
-	}
-	defer pool.Close()
-
-	// Warm the pool so connection setup is not charged to the first iterations.
+	// One connection per client goroutine, all open before the timer starts, so
+	// neither a queue on this side nor connection setup is counted as proxy
+	// latency.
 	//
 	// The direct target stops being able to do this well before the pooled ones
 	// do, because every client is a PostgreSQL backend. That is not a benchmark
 	// failure; it is the entire reason a pooler exists, so it is reported rather
 	// than treated as one.
-	if err := warm(pool, clients); err != nil {
-		if strings.Contains(err.Error(), "53300") {
+	conns, err := warm(url, clients)
+	defer func() {
+		for _, conn := range conns {
+			conn.close()
+		}
+	}()
+	if err != nil {
+		if sqlState(err) == "53300" {
 			b.Skipf("%d clients exceed the server's max_connections: %v", clients, err)
 		}
-		b.Fatalf("warming the pool = %v", err)
+		b.Fatalf("opening the client connections = %v", err)
 	}
 
 	var remaining atomic.Int64
@@ -124,12 +115,10 @@ func benchmarkTarget(b *testing.B, url string, clients int, proxy *process) {
 	b.ResetTimer()
 
 	var wg sync.WaitGroup
-	for range clients {
+	for _, conn := range conns {
 		wg.Go(func() {
-			ctx := context.Background()
 			for remaining.Add(-1) >= 0 {
-				var answer int
-				if err := pool.QueryRow(ctx, "SELECT $1::int", 1).Scan(&answer); err != nil {
+				if _, err := conn.value("SELECT $1::int", 1); err != nil {
 					failures.Add(1)
 					return
 				}
@@ -157,20 +146,39 @@ func benchmarkTarget(b *testing.B, url string, clients int, proxy *process) {
 	}
 }
 
-// warm opens every pooled connection before the timer starts.
-func warm(pool *pgxpool.Pool, clients int) error {
-	var wg sync.WaitGroup
+// warm opens every client connection and runs one query on each, which leaves
+// the benchmark's statement prepared. The clients cache their statements, as a
+// client library does by default, so what is timed is a Bind and an Execute
+// against a named statement.
+//
+// The connections opened so far are returned even on failure, for the caller to
+// close.
+func warm(url string, clients int) ([]*wireClient, error) {
+	conns := make([]*wireClient, clients)
 	errs := make(chan error, clients)
 
-	for range clients {
+	var wg sync.WaitGroup
+	for i := range conns {
 		wg.Go(func() {
-			var answer int
-			if err := pool.QueryRow(context.Background(), "SELECT 1").Scan(&answer); err != nil {
+			conn, err := dialClient(context.Background(), url)
+			if err != nil {
+				errs <- err
+				return
+			}
+			conns[i] = conn.caching()
+			if _, err := conn.value("SELECT $1::int", 1); err != nil {
 				errs <- err
 			}
 		})
 	}
 	wg.Wait()
 	close(errs)
-	return <-errs
+
+	opened := conns[:0]
+	for _, conn := range conns {
+		if conn != nil {
+			opened = append(opened, conn)
+		}
+	}
+	return opened, <-errs
 }

@@ -63,10 +63,26 @@ Windows poller.
 
 `upstream.go` parses a `postgres://` URL once; `login.go` dials, negotiates TLS,
 sends the startup packet and authenticates (SCRAM-SHA-256, MD5, cleartext);
-then the connection is taken over as a descriptor. No pgx in the binary — it is
-still a test dependency, as the client the tests drive the proxy with. pgx was
-dropped because it was 2.2 MB of a 6.9 MB binary for one handshake per
-connection.
+then the connection is taken over as a descriptor. pgx was dropped because it
+was 2.2 MB of a 6.9 MB binary for one handshake per connection.
+
+## No PostgreSQL driver anywhere in the proxy's module
+
+Not in the binary, not in the tests, not in `go.mod`. `client_test.go` is the
+client the tests and the benchmark use: `wireClient`, built on the proxy's own
+login, with the extended-protocol messages written out by hand. A test that
+needs a client must use it, never import a driver;
+`TestModuleDependsOnNoPostgreSQLDriver` fails if one appears in `go.mod`.
+
+There is no `go.sum`, on purpose. The one dependency is the working tree
+(`replace ../..`), which needs no checksum. `go mod tidy` writes the file back
+with the core module's pgx and pglogrepl checksums; delete it again, the same
+test says so. The core module still requires both for the PostgreSQL vendor,
+so `go list -m all` here still names them, though nothing of them is compiled.
+
+Because a client that shares code with the server could share its mistakes,
+`TestProxyServesPsql` runs `psql` (libpq) as a program against the proxy. It
+skips where psql is not installed; keep it.
 
 Rules this code keeps, each with a test:
 
