@@ -24,6 +24,10 @@ const (
 	// accepts: a server that is slow to answer must delay startup, not prevent it.
 	warmTimeout = 10 * time.Second
 
+	// replicationDialTimeout bounds the dedicated connection opened for a
+	// replication client, which is dialed while that client waits in startup.
+	replicationDialTimeout = 10 * time.Second
+
 	// defaultMaxPreparedStatements matches pgx's own default statement cache
 	// rather than PgBouncer's 200, because the two limits interact: a client
 	// caches statement names on its side and only ever Binds them afterwards, so
@@ -70,6 +74,18 @@ type Config struct {
 	// Setting this negative reinstates the unbounded growth it exists to prevent.
 	MaxPreparedStatements int
 
+	// MaxReplicationClients bounds clients connected with the replication
+	// startup parameter. Each gets a server connection of its own, outside the
+	// pool, for as long as it stays: a replication stream never reaches a
+	// transaction boundary, so there is nothing to multiplex.
+	//
+	// Zero, the default, refuses them. Every client of this proxy reaches the
+	// server as the one upstream role, so enabling this lets anyone in the
+	// userlist read the WAL that role may read; that is a decision, not a
+	// default. Each one also occupies a walsender, of which the server has
+	// max_wal_senders.
+	MaxReplicationClients int
+
 	// Pool is the shared engine's configuration. MaxConns here is the number of
 	// real PostgreSQL backends, which is the number this whole exercise exists
 	// to keep small.
@@ -110,6 +126,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxClients < 0 {
 		return fmt.Errorf("gpoolproxy: MaxClients must not be negative, got %d", c.MaxClients)
+	}
+	if c.MaxReplicationClients < 0 {
+		return fmt.Errorf("gpoolproxy: MaxReplicationClients must not be negative, got %d", c.MaxReplicationClients)
 	}
 	return c.Pool.Validate()
 }

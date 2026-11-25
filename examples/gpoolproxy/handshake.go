@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
@@ -47,6 +48,10 @@ type handshake struct {
 
 	key cancelKey
 
+	// pinned is the dedicated server connection opened for a client that asked
+	// for replication, and nil for everyone else.
+	pinned *backend
+
 	ctx  context.Context
 	stop context.CancelFunc
 }
@@ -74,18 +79,42 @@ func (s *handshake) serve() bool {
 		if !errors.Is(err, errHandled) {
 			s.reject(err)
 		}
-		_ = s.conn.Close()
+		s.abandon()
 		return false
 	}
 
 	// A client is entitled to send its first query without waiting to be asked,
 	// so whatever is already in the read buffer travels with the connection.
 	early, _ := s.reader.Peek(s.reader.Buffered())
-	if err := s.proxy.adopt(s.conn, s.key, early); err != nil {
-		_ = s.conn.Close()
+	if err := s.proxy.adopt(s.conn, s.key, early, s.pinned); err != nil {
+		s.abandon()
 		return false
 	}
 	return true
+}
+
+// abandon closes a client that will not be adopted, along with the dedicated
+// connection opened for it if there was one.
+func (s *handshake) abandon() {
+	if s.pinned != nil {
+		s.proxy.endReplication(s.pinned)
+		s.pinned = nil
+	}
+	_ = s.conn.Close()
+}
+
+// replicationMode reports whether a startup packet asks for a replication
+// connection, and with what value.
+//
+// PostgreSQL takes "database" for logical replication and any boolean spelling
+// for physical. Only the spellings of false mean an ordinary connection, and a
+// client that sends one of those gets one.
+func replicationMode(value string) (string, bool) {
+	switch strings.ToLower(value) {
+	case "", "false", "off", "no", "0", "f", "n":
+		return "", false
+	}
+	return value, true
 }
 
 // startup performs the client handshake up to ReadyForQuery.
@@ -115,6 +144,13 @@ func (s *handshake) startup() error {
 		case protocolVersion30:
 			if err := s.authenticate(parameterOf(body, "user")); err != nil {
 				return err
+			}
+			// Only after authentication: an unauthenticated peer must not be
+			// able to make the proxy dial the server.
+			if mode, wanted := replicationMode(parameterOf(body, "replication")); wanted {
+				if s.pinned, err = s.proxy.replicate(s.ctx, mode); err != nil {
+					return err
+				}
 			}
 			return s.ready()
 		default:
@@ -305,8 +341,15 @@ func (s *handshake) send(messages ...pgproto3.BackendMessage) error {
 // itself would tell an unauthenticated peer whether a username exists.
 func (s *handshake) reject(cause error) {
 	message := &pgproto3.ErrorResponse{Severity: "FATAL", Code: "08P01", Message: "protocol error"}
-	if errors.Is(cause, ErrAuthFailed) {
+	switch {
+	case errors.Is(cause, ErrAuthFailed):
 		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "28P01", Message: "authentication failed"}
+	case errors.Is(cause, errReplicationDisabled):
+		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "0A000", Message: "replication connections are not enabled on this proxy"}
+	case errors.Is(cause, errReplicationFull):
+		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "53300", Message: "too many replication connections"}
+	case errors.Is(cause, errReplicationUnavailable):
+		message = &pgproto3.ErrorResponse{Severity: "FATAL", Code: "08006", Message: "the server did not accept a replication connection"}
 	}
 	_ = s.send(message)
 }

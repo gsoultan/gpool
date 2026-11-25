@@ -315,7 +315,8 @@ additionally needs ownership of the tables.
 > of the subscription — there is no transaction boundary at which a connection could be handed
 > back, and a slot admits one active walsender at a time. It is inherently session-scoped, and
 > PgBouncer does not proxy replication connections at all. Point the subscriber at the database
-> directly, not at a pooler.
+> directly, not at a pooler — or at one that passes replication connections through unpooled, as
+> PgBouncer 1.23+ and `examples/gpoolproxy -max-replication` do.
 >
 > The subscriber's *control* connection — publication DDL and `pg_publication_tables` lookups — is
 > an ordinary connection issuing discrete statements with unnamed parameter binding, so it holds no

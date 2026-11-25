@@ -35,6 +35,16 @@ reason and the migration.
   connection found on the way is destroyed and counted as usual, and its permit
   is returned.
 
+- **`examples/gpoolproxy` passes replication clients through, PgBouncer-style.**
+  A client connecting with `replication=database` (or a boolean) gets a server
+  connection of its own in replication mode, outside the pool, held until it
+  disconnects, so a CDC consumer can sit behind the proxy. Previously the
+  parameter was ignored and the first walsender command failed with a syntax
+  error on a pooled backend. Off by default: `-max-replication` sets how many
+  are admitted, because every client shares the upstream role and each stream
+  occupies a walsender. Polling with `pg_logical_slot_get_changes` already
+  worked in transaction mode and now has a test.
+
 ### Changed
 
 - **`examples/gpoolproxy` is an event loop over raw sockets rather than two

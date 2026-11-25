@@ -201,5 +201,25 @@ pgx tolerates it over the extended protocol and refuses the simple protocol
 without `standard_conforming_strings`. Found by the test that counts prepared
 statements server-side.
 
-LISTEN/NOTIFY and logical replication cannot traverse it, for the same reasons
-they cannot traverse PgBouncer. See `mem:pool` and `mem:cdc`.
+LISTEN/NOTIFY cannot traverse it, for the same reason it cannot traverse
+PgBouncer in transaction mode. See `mem:pool`.
+
+## Replication is passed through, never pooled
+
+A client whose startup packet carries `replication` gets a dedicated server
+connection dialed in replication mode (`Proxy.replicate`), attached to its
+session as `pinned`: `settle` never releases it and `close` closes it
+(`discard`). It is outside `pooling.Core` entirely, so it is bounded separately
+by `Config.MaxReplicationClients`, counted before the dial so a burst cannot
+overshoot.
+
+**Default is zero, which refuses with `0A000`.** All clients share the one
+upstream role, so passthrough gives every userlist entry that role's WAL. It is
+an operator's decision. Dial errors are not wrapped into the refusal: they can
+quote the connection string, and the refusal goes to a client.
+
+The dial happens only after SCRAM succeeds. An unauthenticated peer must not be
+able to make the proxy open server connections.
+
+SQL polling (`pg_logical_slot_get_changes`) needs none of this: it is one
+statement and pools like any other. See `mem:cdc`.

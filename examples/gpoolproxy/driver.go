@@ -45,7 +45,26 @@ var _ interface {
 // Hijack then surrenders the socket. Reimplementing that handshake to own the
 // socket from the first byte would mean a second, less tested copy of it.
 func (d *backendDriver) Connect(ctx context.Context) (*backend, error) {
-	conn, err := pgconn.ConnectConfig(ctx, d.config.Copy())
+	return d.dial(ctx, d.config.Copy())
+}
+
+// Replicate establishes a connection in replication mode, for one client and
+// outside the pool.
+//
+// mode is the client's own replication parameter, passed through: "database"
+// for logical replication, a boolean for physical. The server decides what it
+// allows, as it would have had the client connected directly.
+func (d *backendDriver) Replicate(ctx context.Context, mode string) (*backend, error) {
+	config := d.config.Copy()
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	config.RuntimeParams["replication"] = mode
+	return d.dial(ctx, config)
+}
+
+func (d *backendDriver) dial(ctx context.Context, config *pgconn.Config) (*backend, error) {
+	conn, err := pgconn.ConnectConfig(ctx, config)
 	if err != nil {
 		return nil, err
 	}

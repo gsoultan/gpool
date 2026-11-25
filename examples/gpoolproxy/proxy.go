@@ -25,6 +25,15 @@ import (
 // begun to shut down.
 var errClosing = errors.New("gpoolproxy: shutting down")
 
+// Refusals of a replication client. They are distinct so the client can be told
+// which, in SQLSTATE terms: asking for something this proxy is not configured to
+// give, arriving when every place is taken, or the server not answering.
+var (
+	errReplicationDisabled    = errors.New("gpoolproxy: replication connections are not enabled")
+	errReplicationFull        = errors.New("gpoolproxy: too many replication connections")
+	errReplicationUnavailable = errors.New("gpoolproxy: server refused or did not answer a replication connection")
+)
+
 // cancelTimeout bounds the side connection a cancellation request opens.
 const cancelTimeout = 5 * time.Second
 
@@ -83,6 +92,10 @@ type Proxy struct {
 	// goroutines currently dialing one for them.
 	waiters waiters
 	growing atomic.Int32
+
+	// replicating counts the dedicated connections held by replication clients,
+	// which are outside the pool and so outside its accounting.
+	replicating atomic.Int32
 
 	mu       sync.Mutex
 	sessions map[cancelKey]*session
@@ -304,7 +317,49 @@ func (p *Proxy) drainInbox(w *worker) {
 
 // adopt turns an authenticated connection into a session the workers serve.
 // early is whatever the client sent beyond its handshake.
-func (p *Proxy) adopt(conn net.Conn, key cancelKey, early []byte) error {
+// replicate opens a dedicated server connection for a replication client.
+//
+// It is not taken from the pool and never returns to it. Logical replication
+// cannot be pooled: CopyBoth never yields a transaction boundary, and a slot
+// admits one walsender. So the proxy does for such a client what PgBouncer does,
+// which is get out of the way — one client, one server connection, bytes passed
+// through until either end hangs up.
+//
+// The count is taken before dialing so that a burst of clients cannot open more
+// connections than the bound while their dials are still in flight.
+func (p *Proxy) replicate(ctx context.Context, mode string) (*backend, error) {
+	limit := int32(p.config.MaxReplicationClients)
+	if limit == 0 {
+		return nil, errReplicationDisabled
+	}
+	if p.replicating.Add(1) > limit {
+		p.replicating.Add(-1)
+		return nil, errReplicationFull
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, replicationDialTimeout)
+	defer cancel()
+
+	target, err := p.driver.Replicate(ctx, mode)
+	if err != nil {
+		p.replicating.Add(-1)
+		// The cause is not wrapped: a dial error can quote the connection
+		// string, and this one travels towards a client.
+		return nil, errReplicationUnavailable
+	}
+	return target, nil
+}
+
+// endReplication closes a dedicated connection and gives its place back.
+func (p *Proxy) endReplication(target *backend) {
+	_ = p.driver.Close(context.Background(), target)
+	p.replicating.Add(-1)
+}
+
+// adopt hands an authenticated client to the event loop. pinned, when not nil,
+// is a dedicated server connection the session holds for its whole life; if
+// adopt fails it is still the caller's to close.
+func (p *Proxy) adopt(conn net.Conn, key cancelKey, early []byte, pinned *backend) error {
 	if p.closing.Load() {
 		return errClosing
 	}
@@ -326,6 +381,12 @@ func (p *Proxy) adopt(conn net.Conn, key cancelKey, early []byte) error {
 		s.stalled = true
 	}
 
+	if pinned != nil {
+		s.pinned = true
+		s.backend = pinned
+		pinned.sock.owner.Store(s)
+	}
+
 	p.register(s)
 	if !p.socks.put(&s.client) {
 		p.unregister(s)
@@ -333,9 +394,32 @@ func (p *Proxy) adopt(conn net.Conn, key cancelKey, early []byte) error {
 		return errTooManyDescriptors
 	}
 
+	// The pinned connection is listed before the client is, so that if it
+	// cannot be, nothing is yet live to undo. From here its events may arrive on
+	// any worker, which is why the session was complete before this line.
+	if pinned != nil {
+		if err := pinned.enlist(p.poller); err != nil {
+			p.socks.drop(&s.client)
+			p.unregister(s)
+			_ = syscall.Close(fd)
+			return err
+		}
+	}
+
 	// Registering reports the socket's current readiness, so a query that
 	// arrives before this returns is not missed.
 	if err := p.poller.add(fd); err != nil {
+		// A worker may already be serving the pinned connection's first event,
+		// so the session is retired under its lock rather than out from under it.
+		s.mu.Lock()
+		s.closed = true
+		s.backend = nil
+		s.mu.Unlock()
+		if pinned != nil {
+			pinned.delist(p.poller)
+			pinned.sock.owner.Store(nil)
+		}
+
 		p.socks.drop(&s.client)
 		p.unregister(s)
 		_ = syscall.Close(fd)

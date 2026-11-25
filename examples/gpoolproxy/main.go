@@ -94,6 +94,7 @@ func parseFlags(args []string) (Config, error) {
 	flags.IntVar(&maxConns, "max-conns", 0, "server connections to pool (default: max(4, GOMAXPROCS))")
 	flags.IntVar(&minConns, "min-conns", 0, "server connections to keep warm")
 	flags.IntVar(&config.MaxClients, "max-clients", defaultMaxClients, "concurrent client sessions to accept")
+	flags.IntVar(&config.MaxReplicationClients, "max-replication", 0, "replication clients to pass through, each on its own server connection (default: refused)")
 	flags.DurationVar(&lifetime, "max-conn-lifetime", 0, "retire a server connection after this long")
 	flags.DurationVar(&idle, "max-conn-idle", 0, "close a server connection idle this long")
 	flags.StringVar(&config.TLSCert, "tls-cert", "", "certificate for TLS on the client side")

@@ -198,7 +198,8 @@ CPU per query and resident memory alongside the throughput; Linux only.
 Implemented: transaction-mode pooling, **named prepared statements** under a
 bound, SCRAM-SHA-256 with clients, optional TLS on the client side, query
 cancellation (translated from the proxy's key to the backend's), bounded clients,
-and rollback of a transaction whose client disconnected.
+rollback of a transaction whose client disconnected, and **replication
+passthrough** for CDC clients, off unless asked for.
 
 Not implemented, deliberately: session and statement pooling modes, an admin
 console (`SHOW POOLS`), online reconfiguration, `md5` and `trust` authentication,
@@ -260,15 +261,51 @@ to prevent.
 
 **LISTEN/NOTIFY cannot work** through transaction-mode pooling, here or in
 PgBouncer: a subscription needs a session, which is what transaction pooling
-refuses to give. Neither can logical replication — see the CDC notes in the main
-README.
+refuses to give.
+
+### CDC through the proxy
+
+There are two ways to read changes, and they need different things from a
+pooler.
+
+**Polling with SQL works in transaction mode as it is.**
+`pg_logical_slot_get_changes` is an ordinary function call that is complete
+within one statement, so it goes through a pooled backend like any other query.
+
+**A replication stream cannot be pooled, so it is passed through instead.**
+`START_REPLICATION` opens a CopyBoth exchange that never reaches a transaction
+boundary, and a slot admits one walsender. A client that connects with
+`replication=database` (or a boolean, for physical replication) therefore gets a
+server connection of its own, opened in replication mode, outside the pool and
+held until either end hangs up. This is what PgBouncer does from 1.23. The event
+loop moves the stream like any other bytes; the only difference is that the
+backend is never handed on.
+
+```bash
+./gpoolproxy -listen 0.0.0.0:6432 -userlist userlist.txt -max-conns 25 -max-replication 2
+```
+
+`-max-replication` is the number of such clients admitted at once, and it
+defaults to zero, which refuses them with SQLSTATE `0A000`. That default is
+deliberate:
+
+- Every client reaches the server as the one upstream role. Enabling
+  passthrough lets anyone in the userlist read whatever WAL that role may read.
+  The role needs `REPLICATION`; it does not need superuser.
+- Each one holds a server connection outside `-max-conns` and one of the
+  server's `max_wal_senders`. Past the limit a client is refused with `53300`.
+- The proxy does not create, advance or drop slots. A slot whose consumer has
+  gone still retains WAL on the primary, exactly as it would without a proxy in
+  between.
+
+The dedicated connection is not counted in the pool's statistics.
 
 ## Layout
 
 | File | Contents |
 | :--- | :--- |
 | `proxy.go` | listener, client bounding, cancellation registry, backend handoff |
-| `handshake.go` | one client's startup: TLS, authentication, then hand over to the loop |
+| `handshake.go` | one client's startup: TLS, authentication, a dedicated connection for a replication client, then hand over to the loop |
 | `session.go` | one client after startup: forwarding, transaction-unit accounting, acquire and release |
 | `worker.go` | one event-loop thread: wait, dispatch, serve what was granted |
 | `sock.go` | a non-blocking descriptor and whatever it could not write yet |

@@ -88,6 +88,11 @@ type session struct {
 	// not be forwarded for want of a backend, and so are worth parsing again.
 	stalled bool
 
+	// pinned says the backend is a dedicated connection this session holds for
+	// its whole life, never the pool's. A replication client is the case: its
+	// stream has no transaction boundary to hand the connection on at.
+	pinned bool
+
 	scheduled bool
 	closed    bool
 }
@@ -558,7 +563,7 @@ func (s *session) atBoundary() bool {
 // settle returns the backend to the pool if the session has reached a
 // transaction boundary, and reports whether it did.
 func (s *session) settle() bool {
-	if s.backend == nil || s.cancels > 0 || !s.atBoundary() {
+	if s.backend == nil || s.pinned || s.cancels > 0 || !s.atBoundary() {
 		return false
 	}
 	s.release()
@@ -666,6 +671,18 @@ func (s *session) release() {
 	s.proxy.handoff(s.worker)
 }
 
+// discard closes a pinned backend. It was never the pool's, so there is nobody
+// to return it to and nobody waiting for it.
+func (s *session) discard() {
+	target := s.backend
+	s.backend = nil
+	s.expect = nil
+
+	target.sock.reset(s.worker)
+	target.sock.owner.Store(nil)
+	s.proxy.endReplication(target)
+}
+
 // close ends the session. It is idempotent.
 func (s *session) close() {
 	if s.closed {
@@ -676,6 +693,10 @@ func (s *session) close() {
 	// Leave the queue. If this loses the race, a grant is already on its way and
 	// granted will give the connection straight back.
 	s.waiting.CompareAndSwap(true, false)
+
+	if s.pinned && s.backend != nil {
+		s.discard()
+	}
 
 	if s.backend != nil {
 		// A client that left in the middle of an exchange leaves the backend's
