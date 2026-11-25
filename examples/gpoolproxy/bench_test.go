@@ -26,12 +26,13 @@ import (
 //
 // A target with no URL set is skipped, so a partial comparison still runs.
 var benchTargets = []struct {
-	name string
-	env  string
+	name   string
+	env    string
+	pidEnv string
 }{
-	{"direct", "DATABASE_URL"},
-	{"pgbouncer", "PGBOUNCER_URL"},
-	{"gpoolproxy", "PROXY_URL"},
+	{"direct", "DATABASE_URL", ""},
+	{"pgbouncer", "PGBOUNCER_URL", "PGBOUNCER_PID"},
+	{"gpoolproxy", "PROXY_URL", "PROXY_PID"},
 }
 
 // clientCounts sweeps how many client goroutines are in flight at once.
@@ -78,13 +79,13 @@ func BenchmarkThroughput(b *testing.B) {
 				continue
 			}
 			b.Run(fmt.Sprintf("clients=%d/%s", clients, target.name), func(b *testing.B) {
-				benchmarkTarget(b, url, clients)
+				benchmarkTarget(b, url, clients, processOf(target.pidEnv))
 			})
 		}
 	}
 }
 
-func benchmarkTarget(b *testing.B, url string, clients int) {
+func benchmarkTarget(b *testing.B, url string, clients int, proxy *process) {
 	b.Helper()
 
 	config, err := pgxpool.ParseConfig(url)
@@ -119,6 +120,7 @@ func benchmarkTarget(b *testing.B, url string, clients int) {
 	remaining.Store(int64(b.N))
 	var failures atomic.Int64
 
+	before := proxy.sample()
 	b.ResetTimer()
 
 	var wg sync.WaitGroup
@@ -137,6 +139,7 @@ func benchmarkTarget(b *testing.B, url string, clients int) {
 	wg.Wait()
 
 	b.StopTimer()
+	after := proxy.sample()
 
 	if count := failures.Load(); count > 0 {
 		b.Fatalf("%d queries failed", count)
@@ -144,6 +147,14 @@ func benchmarkTarget(b *testing.B, url string, clients int) {
 	// ns/op is per query whatever the client count, so the scaling story is in
 	// queries per second rather than in the default column.
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "queries/s")
+
+	// The proxy's own cost, read from /proc while every client is still
+	// connected. Only available when the proxy runs on this host and its pid is
+	// given; a proxy in another container is measured with its own tools.
+	if proxy != nil && after.ok && before.ok {
+		b.ReportMetric(float64((after.cpu-before.cpu).Nanoseconds())/1e3/float64(b.N), "proxy-cpu-µs/query")
+		b.ReportMetric(float64(after.rss)/(1<<20), "proxy-rss-MiB")
+	}
 }
 
 // warm opens every pooled connection before the timer starts.

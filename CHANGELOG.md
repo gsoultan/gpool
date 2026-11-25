@@ -26,6 +26,45 @@ reason and the migration.
 
 ## [Unreleased]
 
+### Added
+
+- **`pooling.Core.TryAcquire`, an acquire that never waits and never dials.** It
+  returns an idle connection if there is one and reports a miss otherwise. An
+  event loop cannot call `Acquire`, which may block for `AcquireTimeout` or dial;
+  it needs to ask, and queue the caller itself when the answer is no. A dead idle
+  connection found on the way is destroyed and counted as usual, and its permit
+  is returned.
+
+### Changed
+
+- **`examples/gpoolproxy` is an event loop over raw sockets rather than two
+  goroutines per client.** A client costs a descriptor and about a kilobyte once
+  it has authenticated: its socket is registered with one shared epoll instance,
+  a worker per CPU moves bytes from one socket to the other out of a buffer the
+  worker owns, and a session with no backend waits in a FIFO queue that a
+  releasing session hands its backend to directly.
+
+  Measured on one 4-vCPU host against PgBouncer 1.22.0 at matched pool size:
+  resident memory with 3,000 querying clients fell from 155 MiB to 27 (PgBouncer
+  21.5), an idle client from 33 KiB to 2.2 KiB (PgBouncer 1.9), and CPU per query
+  at 3,000 clients from 36 µs to 26.5 (PgBouncer 30). Throughput is level with
+  PgBouncer at one client, behind it at 8 and 32, and ahead from 128, reaching
+  1.5× at 2,000 and above. It is not several times faster or lighter than
+  PgBouncer and the README says why: both spend most of their CPU in the same
+  six socket calls per query.
+
+  Linux is tested. The kqueue poller compiles but has not been run, and the
+  example no longer builds on Windows.
+
+### Fixed
+
+- **`examples/gpoolproxy` could give a backend away between the Execute and the
+  Sync of one batch.** A client that sent Parse/Bind/Execute in one write and
+  Sync in the next had `pending == 0` and an idle transaction status in between,
+  which is the release condition, so the Sync could land on a different backend
+  from the portal it was closing. A session now holds its backend from the first
+  extended-protocol message until the Sync that ends the batch.
+
 ## [1.1.0] - 2026-08-09
 
 ### Added

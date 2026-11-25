@@ -649,32 +649,35 @@ twenty-five connections each still open a thousand, and no amount of library
 design fixes that — bounding connections across processes needs a process.
 
 `examples/gpoolproxy` is that process, built on the same `pkg/pooling` engine
-every vendor runs on: a PostgreSQL wire-protocol pooler in about a thousand
-lines, of which the vendor half is five methods. It is an example rather than a
-product, and its tests prove the property:
+every vendor runs on: a PostgreSQL wire-protocol pooler whose vendor half is five
+methods. It is an example rather than a product, and its tests prove the
+property:
 
 ```
 60 client connections across 12 applications ran on at most 4 PostgreSQL backends
 ```
 
-Measured against PgBouncer 1.25.2 — both in transaction mode, both pooling 16
-server connections, both accepting 3,000 clients, same PostgreSQL, load
-generator on the same network, median of three interleaved runs:
+Measured against PgBouncer 1.22.0 — both in transaction mode, both pooling 16
+server connections, same PostgreSQL over loopback, 4 vCPUs shared with the
+database and the load generator, median of three interleaved passes:
 
-| clients | direct | PgBouncer | gpoolproxy |
-| ---: | ---: | ---: | ---: |
-| 8 | 52,864 | 26,854 | 23,239 |
-| 32 | 115,960 | 34,698 | 51,792 |
-| 128 | 116,002 | 31,046 | **58,532** |
-| 1024 | *exceeds max_connections* | 29,079 | **54,226** |
-| 3000 | — | 26,973 | **50,742** |
+| clients | PgBouncer q/s | gpoolproxy q/s | PgBouncer CPU/query | gpoolproxy CPU/query |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 8,678 | 8,717 | 42.0 µs | 45.2 µs |
+| 8 | **42,168** | 31,949 | **21.0 µs** | 34.2 µs |
+| 32 | **49,759** | 44,239 | **19.0 µs** | 24.2 µs |
+| 128 | 43,089 | **47,781** | 22.5 µs | 23.2 µs |
+| 1024 | 34,297 | **49,088** | 26.0 µs | 24.5 µs |
+| 3000 | 29,387 | **45,158** | 30.0 µs | 26.5 µs |
 
-PgBouncer is the more efficient of the two and it is not close — roughly half the
-CPU per query, and 6 KiB per client against 37 KiB. What it cannot do is use a
-second core: it runs one thread, so one core is its ceiling on any hardware,
-while gpoolproxy was measured at 140% of a core under the same load. That is the
-whole of the throughput difference. See `examples/gpoolproxy/README.md` for the
-method and the caveats.
+With 3,000 clients querying, PgBouncer is 21.5 MiB resident and gpoolproxy 26.8;
+an idle client costs 1.9 KiB in one and 2.2 KiB in the other. PgBouncer is the
+lighter process when nearly empty (3.6 MiB against 8.6, most of it the Go
+binary's own text) and the cheaper one at low concurrency. gpoolproxy pulls ahead
+once PgBouncer's single thread is the limit, because it can use a second core.
+Both spend most of their CPU in the same six socket calls per query, which is why
+neither is several times cheaper than the other. See
+`examples/gpoolproxy/README.md` for the method, the design, and the caveats.
 
 ## 🐬 MySQL and MariaDB
 

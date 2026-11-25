@@ -3,11 +3,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -23,6 +23,10 @@ type backendDriver struct {
 
 	// maxPrepared bounds the prepared statements each connection accumulates.
 	maxPrepared int
+
+	// socks is where a new connection's descriptor is recorded, so the event
+	// loops can find it.
+	socks *sockTable
 
 	// params holds the ParameterStatus set the server reported, captured from a
 	// real connection and replayed to clients during their own startup. A client
@@ -69,35 +73,47 @@ func (d *backendDriver) Connect(ctx context.Context) (*backend, error) {
 		d.params.CompareAndSwap(nil, &statuses)
 	}
 
-	return &backend{
-		conn:     hijacked.Conn,
-		reader:   bufio.NewReaderSize(hijacked.Conn, backendBufSize),
-		writer:   bufio.NewWriterSize(hijacked.Conn, backendBufSize),
+	// From here the connection is a descriptor. pgconn did the part that is worth
+	// not reimplementing; what remains is moving bytes, and an event loop does
+	// that without a goroutine parked on every socket.
+	fd, err := takeOver(hijacked.Conn)
+	if err != nil {
+		_ = hijacked.Conn.Close()
+		return nil, err
+	}
+
+	b := &backend{
 		pid:      hijacked.PID,
 		secret:   hijacked.SecretKey,
 		txStatus: txIdle,
 		prepared: newStatements(d.maxPrepared),
-	}, nil
+	}
+	b.sock.fd = fd
+	b.sock.backend = b
+
+	if !d.socks.put(&b.sock) {
+		_ = syscall.Close(fd)
+		return nil, errTooManyDescriptors
+	}
+	return b, nil
 }
 
 // Close terminates a connection, asking politely first so the server records a
 // clean disconnect rather than an aborted one.
-func (d *backendDriver) Close(ctx context.Context, b *backend) error {
-	defer b.conn.Close()
+//
+// The request is five bytes written to a non-blocking socket. If the kernel will
+// not take even that, the connection is in no state to be asked, and closing it
+// is the answer either way — so this cannot block whoever is discarding it.
+func (d *backendDriver) Close(_ context.Context, b *backend) error {
+	if !b.broken.Load() {
+		_, _ = syscall.Write(b.sock.fd, terminate)
+	}
 
-	if b.broken.Load() {
-		return nil
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = b.conn.SetDeadline(deadline)
-	}
-
-	encoded, err := (&pgproto3.Terminate{}).Encode(nil)
-	if err != nil {
-		return err
-	}
-	_, err = b.conn.Write(encoded)
-	return err
+	// Forgotten before it is closed, so the number cannot be reused while the
+	// table still points at this connection. Closing also withdraws it from the
+	// poller.
+	d.socks.drop(&b.sock)
+	return syscall.Close(b.sock.fd)
 }
 
 // Dead reports a connection the relay could not leave in a parseable state.
@@ -126,10 +142,10 @@ func (d *backendDriver) Recyclable(ctx context.Context, b *backend) bool {
 	return true
 }
 
-// cancel opens a fresh connection and asks the server to cancel whatever this
-// backend is running. PostgreSQL requires the request on a separate connection,
+// cancel opens a fresh connection and asks the server to cancel whatever the
+// backend with this key is running. PostgreSQL requires the request on a separate connection,
 // because the one being cancelled is by definition busy.
-func (d *backendDriver) cancel(ctx context.Context, b *backend) error {
+func (d *backendDriver) cancel(ctx context.Context, pid uint32, secret []byte) error {
 	dialer := &net.Dialer{}
 	network, address := networkAddress(d.config)
 
@@ -143,7 +159,7 @@ func (d *backendDriver) cancel(ctx context.Context, b *backend) error {
 		_ = conn.SetDeadline(deadline)
 	}
 
-	encoded, err := (&pgproto3.CancelRequest{ProcessID: b.pid, SecretKey: b.secret}).Encode(nil)
+	encoded, err := (&pgproto3.CancelRequest{ProcessID: pid, SecretKey: secret}).Encode(nil)
 	if err != nil {
 		return err
 	}

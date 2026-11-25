@@ -14,9 +14,9 @@ const (
 	defaultListen         = "127.0.0.1:6432"
 	defaultCleanupTimeout = 5 * time.Second
 
-	// defaultMaxClients bounds concurrent client sessions. Every accepted
-	// connection costs two goroutines and two 64 KiB relay buffers, so an
-	// unbounded listener is a memory exhaustion vector rather than a feature.
+	// defaultMaxClients bounds concurrent client sessions. A session is about a
+	// kilobyte and a descriptor, which is cheap and still not free, so an
+	// unbounded listener is an exhaustion vector rather than a feature.
 	defaultMaxClients = 1000
 
 	// warmTimeout bounds the connection opened to learn the server's settings

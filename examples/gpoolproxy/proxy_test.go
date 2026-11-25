@@ -55,6 +55,14 @@ func startProxy(t *testing.T, pool pooling.Config) string {
 // startProxyLimited is startProxy with an explicit ceiling on remembered prepared
 // statements, so a test can reach the limit without preparing five hundred.
 func startProxyLimited(t *testing.T, pool pooling.Config, maxPrepared int) string {
+	return startProxyWith(t, func(config *Config) {
+		config.Pool = pool
+		config.MaxPreparedStatements = maxPrepared
+	})
+}
+
+// startProxyWith is startProxy for a test that needs to set something else.
+func startProxyWith(t *testing.T, configure func(*Config)) string {
 	t.Helper()
 
 	credential, err := deriveVerifier(proxyPassword, defaultSCRAMIterations)
@@ -66,13 +74,14 @@ func startProxyLimited(t *testing.T, pool pooling.Config, maxPrepared int) strin
 		t.Fatalf("WriteFile() = %v", err)
 	}
 
-	proxy, err := NewProxy(Config{
-		Listen:                "127.0.0.1:0",
-		Upstream:              upstreamURL(t, appName),
-		Userlist:              userlist,
-		Pool:                  pool,
-		MaxPreparedStatements: maxPrepared,
-	})
+	config := Config{
+		Listen:   "127.0.0.1:0",
+		Upstream: upstreamURL(t, appName),
+		Userlist: userlist,
+	}
+	configure(&config)
+
+	proxy, err := NewProxy(config)
 	if err != nil {
 		t.Fatalf("NewProxy() = %v", err)
 	}
@@ -127,19 +136,19 @@ func TestProxyRunsQueries(t *testing.T) {
 }
 
 // The result set has to survive being relayed without being decoded, including
-// rows larger than the relay buffer, which take the streaming path instead.
+// rows larger than the read buffer, which cross in pieces instead.
 func TestProxyRelaysLargeResults(t *testing.T) {
 	conn := connect(t, startProxy(t, pooling.Config{MaxConns: 2}))
 
 	var total, size int
 	err := conn.QueryRow(t.Context(),
 		"SELECT count(*), max(length(payload)) FROM (SELECT repeat('x', $1::int) AS payload FROM generate_series(1, 500)) s",
-		relayChunk*40).Scan(&total, &size)
+		readBufSize*3).Scan(&total, &size)
 	if err != nil {
 		t.Fatalf("QueryRow() = %v", err)
 	}
-	if total != 500 || size != relayChunk*40 {
-		t.Errorf("got %d rows of %d bytes, want 500 of %d", total, size, relayChunk*40)
+	if total != 500 || size != readBufSize*3 {
+		t.Errorf("got %d rows of %d bytes, want 500 of %d", total, size, readBufSize*3)
 	}
 }
 
