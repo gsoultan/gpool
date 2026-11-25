@@ -2,7 +2,10 @@
 
 package pool
 
-import "errors"
+import (
+	"database/sql"
+	"errors"
+)
 
 var (
 	// ErrPoolClosed is returned by Acquire and the pool-level query helpers once Close has been called.
@@ -27,4 +30,19 @@ var (
 
 	// ErrBatchClosed is returned when batch results are read after Close.
 	ErrBatchClosed = errors.New("gpool/postgres: batch results already closed")
+
+	// ErrNoRows is returned by Row.Scan when the query returned no rows. It is
+	// sql.ErrNoRows itself, so code written against database/sql matches it.
+	ErrNoRows = sql.ErrNoRows
+
+	// ErrConnBusy is returned when a connection is used while a result it
+	// returned is still open. Close the Rows first; the protocol answers one
+	// request at a time.
+	ErrConnBusy = errors.New("gpool/postgres: connection is busy with an unread result")
+
+	// ErrTxCommitRollback is returned by Commit when the transaction had already
+	// failed, so the server rolled it back instead of committing.
+	ErrTxCommitRollback = errors.New("gpool/postgres: commit unexpectedly resulted in rollback")
+
+	errNotOnARow = errors.New("gpool/postgres: Scan called without a current row; call Next first")
 )

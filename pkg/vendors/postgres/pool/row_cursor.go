@@ -4,14 +4,13 @@ package pool
 
 import (
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
 )
 
 // rowCursor is a view over the row a result set is currently positioned on,
 // yielded by pgRows.All. It is a value type holding no ownership, so copying it
 // out of the loop gives a stale view rather than a dangling pooled object.
 type rowCursor struct {
-	rows pgx.Rows
+	rows resultSet
 }
 
 var _ gpool.Row = rowCursor{}

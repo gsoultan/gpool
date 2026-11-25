@@ -6,8 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
 )
 
 // Close used to nil the driver handle and then dereference it on the next call,
@@ -92,7 +91,7 @@ func TestRowsFieldDescriptionsAreTranslated(t *testing.T) {
 	t.Parallel()
 
 	driver := &fakeRows{
-		fields: []pgconn.FieldDescription{
+		fields: []wire.Field{
 			{Name: "id", DataTypeOID: 23, DataTypeSize: 4},
 			{Name: "email", DataTypeOID: 25, DataTypeSize: -1},
 		},
@@ -166,8 +165,8 @@ func TestRowScanReportsNoRows(t *testing.T) {
 
 	row := newRow(&fakeRows{remaining: 0}, nil)
 
-	if err := row.Scan(); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("Scan() on an empty result = %v, want pgx.ErrNoRows", err)
+	if err := row.Scan(); !errors.Is(err, ErrNoRows) {
+		t.Fatalf("Scan() on an empty result = %v, want ErrNoRows", err)
 	}
 }
 
@@ -201,7 +200,7 @@ func TestErrorRowDefersTheError(t *testing.T) {
 func TestResultReportsRowsAffected(t *testing.T) {
 	t.Parallel()
 
-	result := pgResult{tag: pgconn.NewCommandTag("UPDATE 3")}
+	result := pgResult{tag: "UPDATE 3"}
 
 	if got := result.RowsAffected(); got != 3 {
 		t.Errorf("RowsAffected() = %d, want 3", got)

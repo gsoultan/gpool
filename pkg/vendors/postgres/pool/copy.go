@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
 )
 
 // Both the pool and a checked-out connection can bulk copy.
@@ -37,9 +36,7 @@ func (c *connWrapper) CopyFrom(ctx context.Context, request gpool.CopyRequest) (
 		return 0, err
 	}
 
-	// gpool.CopyRows and pgx.CopyFromSource have identical method sets, so the
-	// source passes straight through with no adapter and no per-row copying.
-	copied, err := c.pgx().CopyFrom(ctx, pgx.Identifier(request.Table), request.Columns, request.Rows)
+	copied, err := c.conn().session.copyFrom(ctx, request)
 	if err != nil {
 		return copied, fmt.Errorf("gpool/postgres: copy into %v: %w", request.Table, err)
 	}

@@ -7,7 +7,6 @@ import (
 
 	"github.com/gsoultan/gpool/pkg/gpool"
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/jackc/pgx/v5"
 )
 
 // connWrapper is a checked-out connection implementing gpool.Conn.
@@ -31,11 +30,6 @@ func (c *connWrapper) conn() *pgConn {
 	return c.handle.Conn()
 }
 
-// pgx returns the driver connection.
-func (c *connWrapper) pgx() *pgx.Conn {
-	return c.handle.Conn().conn
-}
-
 // Release returns the connection to the pool. It is idempotent; releasing twice is
 // a no-op rather than a double return that would corrupt pool accounting.
 func (c *connWrapper) Release() {
@@ -55,12 +49,7 @@ func (c *connWrapper) Exec(ctx context.Context, sql string, args ...any) (gpool.
 	if err := c.live(); err != nil {
 		return nil, err
 	}
-
-	tag, err := c.pgx().Exec(ctx, sql, args...)
-	if err != nil {
-		return nil, err
-	}
-	return pgResult{tag: tag}, nil
+	return c.conn().exec(ctx, sql, args)
 }
 
 // Query executes a query. The returned Rows do not own the connection: the caller
@@ -69,12 +58,7 @@ func (c *connWrapper) Query(ctx context.Context, sql string, args ...any) (gpool
 	if err := c.live(); err != nil {
 		return nil, err
 	}
-
-	rows, err := c.pgx().Query(ctx, sql, args...)
-	if err != nil {
-		return nil, err
-	}
-	return newRows(rows, nil), nil
+	return c.conn().query(ctx, sql, args, nil)
 }
 
 // QueryRow executes a query expected to return at most one row.
@@ -82,21 +66,7 @@ func (c *connWrapper) QueryRow(ctx context.Context, sql string, args ...any) gpo
 	if err := c.live(); err != nil {
 		return errorRow{err: err}
 	}
-
-	rows, err := c.pgx().Query(ctx, sql, args...)
-	if err != nil {
-		closeRows(rows)
-		return errorRow{err: err}
-	}
-	return newRow(rows, nil)
-}
-
-// closeRows closes a result set that is being discarded. pgx returns a non-nil Rows
-// alongside a query error, and leaving it open would keep the connection busy.
-func closeRows(rows pgx.Rows) {
-	if rows != nil {
-		rows.Close()
-	}
+	return c.conn().queryRow(ctx, sql, args, nil)
 }
 
 // Begin starts a transaction on this connection. The transaction does not own the
@@ -105,12 +75,7 @@ func (c *connWrapper) Begin(ctx context.Context) (gpool.Tx, error) {
 	if err := c.live(); err != nil {
 		return nil, err
 	}
-
-	tx, err := c.pgx().Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return newTx(tx), nil
+	return c.conn().begin(ctx)
 }
 
 // Ping verifies the connection is still usable.
@@ -118,5 +83,5 @@ func (c *connWrapper) Ping(ctx context.Context) error {
 	if err := c.live(); err != nil {
 		return err
 	}
-	return c.pgx().Ping(ctx)
+	return c.conn().ping(ctx)
 }

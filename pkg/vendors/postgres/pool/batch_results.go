@@ -6,13 +6,12 @@ import (
 	"sync/atomic"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
 )
 
 // batchResults reads the replies to a pipelined batch.
 type batchResults struct {
-	results pgx.BatchResults
-	closed  atomic.Bool
+	reader *batchReader
+	closed atomic.Bool
 }
 
 var _ gpool.BatchResults = (*batchResults)(nil)
@@ -23,11 +22,15 @@ func (r *batchResults) Exec() (gpool.Result, error) {
 		return nil, ErrBatchClosed
 	}
 
-	tag, err := r.results.Exec()
+	cursor, err := r.reader.statement()
 	if err != nil {
 		return nil, err
 	}
-	return pgResult{tag: tag}, nil
+	cursor.Close()
+	if cursor.err != nil {
+		return nil, cursor.err
+	}
+	return pgResult{tag: cursor.tag}, nil
 }
 
 // Query reads the next reply as a row set. The rows own nothing: the batch's
@@ -37,12 +40,11 @@ func (r *batchResults) Query() (gpool.Rows, error) {
 		return nil, ErrBatchClosed
 	}
 
-	rows, err := r.results.Query()
+	cursor, err := r.reader.statement()
 	if err != nil {
-		closeRows(rows)
 		return nil, err
 	}
-	return newRows(rows, nil), nil
+	return newRows(cursor, nil), nil
 }
 
 // QueryRow reads the next reply as a single row.
@@ -51,12 +53,11 @@ func (r *batchResults) QueryRow() gpool.Row {
 		return errorRow{err: ErrBatchClosed}
 	}
 
-	rows, err := r.results.Query()
+	cursor, err := r.reader.statement()
 	if err != nil {
-		closeRows(rows)
 		return errorRow{err: err}
 	}
-	return newRow(rows, nil)
+	return newRow(cursor, nil)
 }
 
 // Close drains any unread replies and returns the batch's first error. It is
@@ -66,7 +67,7 @@ func (r *batchResults) Close() error {
 	if !r.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	return r.results.Close()
+	return r.reader.close()
 }
 
 // failedBatchResults reports a failure that happened before anything was sent,

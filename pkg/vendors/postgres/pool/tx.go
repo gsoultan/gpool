@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
 )
 
 // pgTx is a database transaction implementing gpool.Tx.
@@ -16,17 +15,18 @@ import (
 // idiom pairs a deferred Rollback with a Commit on the happy path, so the second
 // call is expected: it returns ErrTxClosed and touches nothing.
 type pgTx struct {
-	tx   pgx.Tx
+	tx   transaction
 	done atomic.Bool
 }
 
 var _ gpool.Tx = (*pgTx)(nil)
 
-func newTx(tx pgx.Tx) *pgTx {
+func newTx(tx transaction) *pgTx {
 	return &pgTx{tx: tx}
 }
 
-// Commit commits the transaction.
+// Commit commits the transaction. If it had already failed, the server rolls it
+// back instead, and Commit returns ErrTxCommitRollback.
 func (t *pgTx) Commit(ctx context.Context) error {
 	if !t.done.CompareAndSwap(false, true) {
 		return ErrTxClosed
@@ -48,8 +48,7 @@ func (t *pgTx) Exec(ctx context.Context, sql string, args ...any) (gpool.Result,
 	if t.done.Load() {
 		return nil, ErrTxClosed
 	}
-
-	tag, err := t.tx.Exec(ctx, sql, args...)
+	tag, err := t.tx.Exec(ctx, sql, args)
 	if err != nil {
 		return nil, err
 	}
@@ -62,8 +61,7 @@ func (t *pgTx) Query(ctx context.Context, sql string, args ...any) (gpool.Rows, 
 	if t.done.Load() {
 		return nil, ErrTxClosed
 	}
-
-	rows, err := t.tx.Query(ctx, sql, args...)
+	rows, err := t.tx.Query(ctx, sql, args)
 	if err != nil {
 		return nil, err
 	}
@@ -75,10 +73,8 @@ func (t *pgTx) QueryRow(ctx context.Context, sql string, args ...any) gpool.Row 
 	if t.done.Load() {
 		return errorRow{err: ErrTxClosed}
 	}
-
-	rows, err := t.tx.Query(ctx, sql, args...)
+	rows, err := t.tx.Query(ctx, sql, args)
 	if err != nil {
-		closeRows(rows)
 		return errorRow{err: err}
 	}
 	return newRow(rows, nil)

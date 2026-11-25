@@ -6,33 +6,31 @@ import (
 	"sync/atomic"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
 )
 
 // pgRow is a single-row result implementing gpool.Row.
 //
-// It holds the full result set rather than a pgx.Row, because pgx.Row exposes only
-// Scan and closes the underlying result as a side effect of scanning. A caller who
-// decides not to read the row would then have no way to close it, and returning
-// that connection to the pool hands the next caller a connection stuck mid-query.
+// It holds the full result set rather than a single row, so a caller who decides
+// not to read the row can still close it. Returning that connection to the pool
+// unclosed would hand the next caller a connection stuck mid-query.
 //
 // owner is set only when the row was produced by a pool-level QueryRow, in which
 // case finishing the row is what returns the connection to the pool. Both Scan and
 // Release finish it, so either call is sufficient and both together are safe.
 type pgRow struct {
-	rows  pgx.Rows
-	owner *connWrapper
+	rows  resultSet
+	owner releaser
 	done  atomic.Bool
 }
 
 var _ gpool.Row = (*pgRow)(nil)
 
-func newRow(rows pgx.Rows, owner *connWrapper) *pgRow {
+func newRow(rows resultSet, owner releaser) *pgRow {
 	return &pgRow{rows: rows, owner: owner}
 }
 
-// Scan reads the single row into dest and finishes the row. It returns pgx.ErrNoRows
-// when the query produced nothing, matching pgx's own QueryRow semantics.
+// Scan reads the single row into dest and finishes the row. It returns ErrNoRows,
+// which is sql.ErrNoRows, when the query produced nothing.
 func (r *pgRow) Scan(dest ...any) error {
 	if !r.done.CompareAndSwap(false, true) {
 		return ErrRowsClosed
@@ -46,7 +44,7 @@ func (r *pgRow) Scan(dest ...any) error {
 		if err := r.rows.Err(); err != nil {
 			return err
 		}
-		return pgx.ErrNoRows
+		return ErrNoRows
 	}
 	if err := r.rows.Scan(dest...); err != nil {
 		return err

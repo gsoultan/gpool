@@ -3,21 +3,32 @@
 package pool
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // pgResult is the outcome of an Exec, implementing gpool.Result.
 // It is an immutable value, so it carries no release hazard of its own.
 type pgResult struct {
-	tag pgconn.CommandTag
+	tag string
 }
 
 var _ gpool.Result = pgResult{}
 
-// RowsAffected returns the number of rows the statement changed.
+// RowsAffected returns the number of rows the statement changed: the last
+// number in its command tag, as in "INSERT 0 5" or "UPDATE 3".
 func (r pgResult) RowsAffected() int64 {
-	return r.tag.RowsAffected()
+	space := strings.LastIndexByte(r.tag, ' ')
+	if space < 0 {
+		return 0
+	}
+	n, err := strconv.ParseInt(r.tag[space+1:], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // Release is a no-op, kept so callers can treat every result uniformly.
@@ -25,5 +36,5 @@ func (r pgResult) Release() {}
 
 // String returns the raw command tag, for example "UPDATE 3".
 func (r pgResult) String() string {
-	return r.tag.String()
+	return r.tag
 }

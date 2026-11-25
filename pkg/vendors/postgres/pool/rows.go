@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
 )
 
 // pgRows is a query result set implementing gpool.Rows.
@@ -15,14 +14,14 @@ import (
 // owner is set only when the result set was produced by a pool-level Query, in
 // which case closing the rows is what returns the connection to the pool.
 type pgRows struct {
-	rows   pgx.Rows
-	owner  *connWrapper
+	rows   resultSet
+	owner  releaser
 	closed atomic.Bool
 }
 
 var _ gpool.Rows = (*pgRows)(nil)
 
-func newRows(rows pgx.Rows, owner *connWrapper) *pgRows {
+func newRows(rows resultSet, owner releaser) *pgRows {
 	return &pgRows{rows: rows, owner: owner}
 }
 
@@ -63,7 +62,7 @@ func (r *pgRows) Scan(dest ...any) error {
 
 // FieldDescriptions returns column metadata for the result set.
 func (r *pgRows) FieldDescriptions() []gpool.Field {
-	pgFields := r.rows.FieldDescriptions()
+	pgFields := r.rows.Fields()
 
 	fields := make([]gpool.Field, len(pgFields))
 	for i, f := range pgFields {
@@ -88,7 +87,7 @@ func (r *pgRows) RawValues() [][]byte {
 
 // CommandTag returns the command tag, which is only populated once the rows are closed.
 func (r *pgRows) CommandTag() string {
-	return r.rows.CommandTag().String()
+	return r.rows.Tag()
 }
 
 // All iterates the result set, closing it when iteration ends by any path.
