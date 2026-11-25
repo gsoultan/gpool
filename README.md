@@ -1047,7 +1047,7 @@ measured separately. Apple M5 Pro, PostgreSQL 17 over loopback, `GOMAXPROCS=15`.
 
 **Per connection.** Measured by `TestMemoryPerPooledConnection` and `TestMemoryPerPgxConnection`,
 which hold every connection open and read steady-state heap. These two rows were measured on a
-4-core Linux VM against PostgreSQL on loopback, not on the machine above:
+4 vCPUs of a 2.3 GHz Xeon against PostgreSQL 16.15 on loopback, not on the machine above:
 
 | Pool | KiB / connection | Projected at 5,000 connections |
 | :--- | ---: | ---: |
@@ -1070,7 +1070,7 @@ binding constraint long before gpool is.
 is measured against. It compares gpool with `pgxpool`, `database/sql`, and PgBouncer, with pool
 capacity matched on both sides so the comparison measures the driver rather than queueing.
 
-**Driver against pgx** — `BenchmarkDriver*`, 4-core Linux VM, PostgreSQL 17 on loopback (so the
+**Driver against pgx** — `BenchmarkDriver*`, 4 vCPUs of a 2.3 GHz Xeon, PostgreSQL 16.15 on loopback (so the
 client and the server share the four cores), runs interleaved and the median reported:
 
 | Workload | gpool | pgx | |
