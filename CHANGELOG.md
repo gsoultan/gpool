@@ -47,6 +47,36 @@ reason and the migration.
 
 ### Changed
 
+- **gpool no longer depends on pgx or pglogrepl; `go.mod` requires nothing.**
+  The PostgreSQL pool and CDC vendors run on gpool's own protocol
+  implementation (`pkg/vendors/postgres/wire`) and type codec
+  (`pkg/vendors/postgres/codec`), both standard library only, and CDC decodes
+  `pgoutput` itself. The public interfaces are unchanged. Measured against pgx
+  at matched pool sizes on one machine: 20–28% faster on multi-row results
+  with a third of the allocations, 26% faster on a single row over one
+  connection, 18% faster with more callers than connections, and 13% slower
+  with exactly as many callers as connections on a four-core box. A pooled
+  connection holds 11 KiB of heap against pgxpool's 82, a minimal program is
+  5.3 MiB against 8.9, and CDC decodes an UPDATE in about half the time with
+  under half the allocations. Details and the one loss are in the README.
+
+  **Migration:**
+  - `Config.BeforeConnect` is now `func(*wire.Config) error` (it was
+    `func(*pgx.ConnConfig) error`); `RuntimeParams`, `Host`, `User`,
+    `Password` and `TLSConfig` are where they were.
+  - `Config.AfterConnect` is now `func(context.Context, gpool.Conn) error`.
+  - A server error is `*wire.Error` instead of `*pgconn.PgError`. Classify by
+    `Code` or by the `SQLState()` method, which both have.
+  - `ErrNoRows` is `sql.ErrNoRows`, which `pgx.ErrNoRows` also wrapped.
+  - `DescriptionCacheCapacity` has no effect and is kept so configurations
+    still compile.
+  - Types the codec does not know are scanned from their text form; there is
+    no type registration. `Exec` of `COPY ... TO STDOUT` is refused.
+
+- **The benchmarks are a module of their own.** pgx and pglogrepl appear only
+  there, as the libraries gpool is measured against, and never reach a
+  consumer's build.
+
 - **`examples/gpoolproxy` logs in to PostgreSQL with its own code instead of
   pgx.** The proxy only ever needed a client library for the upstream login,
   after which the connection is a descriptor on the event loop. That login is
@@ -100,6 +130,11 @@ reason and the migration.
   example no longer builds on Windows.
 
 ### Fixed
+
+- **`CreateSlot` and `DropSlot` validate the slot name they are given.** The
+  name reaches the replication command unquoted, and only `Config.SlotName`
+  was checked against `slotNamePattern`; a name passed to either method went
+  in as written.
 
 - **`examples/gpoolproxy` could give a backend away between the Execute and the
   Sync of one batch.** A client that sent Parse/Bind/Execute in one write and

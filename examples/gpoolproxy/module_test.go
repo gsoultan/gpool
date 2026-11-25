@@ -17,9 +17,9 @@ import (
 //
 // go.sum is held to the same rule by not existing. The module's one dependency
 // is the working tree next to it, which needs no checksum, and nothing the
-// proxy or its tests compile comes from anywhere else. `go mod tidy` writes the
-// file back, listing what the core module's PostgreSQL vendor requires; none of
-// it is built here, and the file is to be deleted again.
+// proxy or its tests compile comes from anywhere else. The core module requires
+// nothing either, so `go mod tidy` has no checksum to write; a go.sum that
+// appears means a dependency did.
 func TestModuleDependsOnNoPostgreSQLDriver(t *testing.T) {
 	for _, file := range []string{"go.mod", "go.sum"} {
 		content, err := os.ReadFile(file)

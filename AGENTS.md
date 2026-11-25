@@ -21,8 +21,8 @@ These outrank convenience. Every profile enforces them.
 3. **Never recycle an object whose lifetime user code controls.** If it escapes to
    the caller, it is not poolable. A second release from one goroutine would hand a
    live resource to another.
-4. **One goroutine owns a connection.** `pgconn.PgConn`'s busy check is a debug
-   assertion, not a lock.
+4. **One goroutine owns a connection.** `wire.Conn` has no lock, and a session's
+   busy flag is bookkeeping, not mutual exclusion.
 5. **A caller-owned map or slice is allocated fresh.** No pooled maps in events.
 6. **Confirm work only after it is done.** CDC positions advance after the consumer's
    loop body returns, never before.
@@ -48,7 +48,8 @@ These outrank convenience. Every profile enforces them.
   `BenchmarkGpoolAcquireRelease` is 1 alloc / ~320ns; a query is ~50µs.
 
 **Checklist:** `gofmt` clean · `go vet` clean · exported symbols documented · no new
-dependency without justification (currently pgx/v5 and pglogrepl, nothing else).
+dependency without justification (the core module has none; pgx and pglogrepl
+appear only in `benchmarks/`, as what gpool is measured against).
 
 ---
 
@@ -119,8 +120,9 @@ including errors? · what does this cost × `MaxConns`?
 - Every network operation is bounded. No `context.Background()` without a timeout.
 - Teardown uses `context.WithoutCancel` or a fresh context so a cancelled request
   still gets a graceful terminate.
-- Parse the connection string once and clone the config per connection. `pgx.Connect`
-  re-parses env, service files, and `~/.pgpass` every call.
+- Parse the connection string once and clone the config per connection.
+  `wire.ParseConfig` reads the environment and the password file, which a dial
+  per connection would repeat.
 - Bound connection lifetime. `MaxConnLifetime` is what recovers the pool after a
   failover or a DNS change; a pool without it serves a dead server forever.
 - Health-gate the return path. A connection that is closed, expired, or failed its
@@ -178,7 +180,7 @@ round-trip cost per call?
 **Owns:** the test suite, reproducibility, regression coverage.
 
 - TDD: write the failing test that names the defect before the fix.
-- Table-driven tests. Mock the interface (`pgx.Rows`, `pgx.Tx`), never the concrete type.
+- Table-driven tests. Mock the interface (`resultSet`, `transaction`), never the concrete type.
 - Every bug fixed gets a regression test whose comment says what used to go wrong.
   That comment is the test's real payload.
 - Unit tests run with no database. Integration tests live in `integration/` and skip

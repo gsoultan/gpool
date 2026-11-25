@@ -5,6 +5,7 @@ package benchmarks
 import (
 	"context"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"runtime"
 	"sync"
 	"testing"
@@ -245,4 +246,44 @@ func stableGoroutines() int {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return runtime.NumGoroutine()
+}
+
+// TestMemoryPerPgxConnection is TestMemoryPerPooledConnection for pgxpool with
+// its own defaults, measured the same way on the same machine, so the two
+// numbers can be set side by side.
+func TestMemoryPerPgxConnection(t *testing.T) {
+	connString := requireDatabase(t)
+
+	const conns = 64
+
+	config, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		t.Fatalf("ParseConfig() = %v", err)
+	}
+	config.MaxConns = conns
+
+	before := heapInUse()
+	pool, err := pgxpool.NewWithConfig(t.Context(), config)
+	if err != nil {
+		t.Fatalf("NewWithConfig() = %v", err)
+	}
+	defer pool.Close()
+
+	held := make([]*pgxpool.Conn, 0, conns)
+	for range conns {
+		conn, err := pool.Acquire(t.Context())
+		if err != nil {
+			t.Fatalf("Acquire() = %v", err)
+		}
+		held = append(held, conn)
+	}
+	for _, conn := range held {
+		conn.Release()
+	}
+
+	after := heapInUse()
+	perConn := (after - before) / conns
+	t.Logf("per pooled connection: %.1f KiB", float64(perConn)/1024)
+	t.Logf("projected at %d connections: %.1f MiB", targetClients,
+		float64(perConn)*targetClients/(1<<20))
 }

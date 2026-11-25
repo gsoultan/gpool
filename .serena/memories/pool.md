@@ -1,11 +1,11 @@
 # Pool internals
 
 The PostgreSQL vendor runs on `pkg/pooling` like every other vendor. What is left
-here is what is genuinely PostgreSQL-specific: dialling pgx, judging a connection
+here is what is genuinely PostgreSQL-specific: dialling with `wire`, judging a connection
 without I/O, and cleaning one up. Everything below about capacity, sharding, the
 clock and the reaper now describes the *engine*, reached through `Core[*pgConn]`.
 
-`pgConn` is the vendor's connection type — `{conn *pgx.Conn; listening bool}`.
+`pgConn` is the vendor's connection type — `{session *session; listening bool}`.
 Being a type parameter rather than an interface is what lets the vendor keep its
 own per-connection bookkeeping without a side table.
 
@@ -84,8 +84,8 @@ round trip, and makes `Stat` lock-free.
 - `Close` drains checked-out connections by acquiring all permits with
   `closeDrainTimeout`, then destroys idle. Anything still out is destroyed by
   whoever releases it, since `release` sees `closed`.
-- `release` → `recyclable()` gate, in order: dead → destroy; `PgConn().IsBusy()`
-  (unread result, mid-protocol, unsalvageable) → destroy; `TxStatus() != 'I'` →
+- `release` → `recyclable()` gate, in order: dead → destroy; `session.busy()`
+  (an exchange left open: unread result, mid-protocol, unsalvageable) → destroy; `TxStatus() != 'I'` →
   `ROLLBACK`, destroy only if that fails; `idleConn.listening` → `UNLISTEN *`,
   destroy if that fails; failed reset → destroy; lifetime expired → destroy.
   Idle expiry is *not* checked on release (it was in use until now).
@@ -153,14 +153,20 @@ expiry needs tens of milliseconds and the reaper on.
 `BulkCopier` (Pool + Conn), `Batcher` (Conn), `Notifier` (Conn), `Resizable`
 (Pool), `Lifecycle` (Stat). Separate interfaces reached by type assertion, so
 `Pool`/`Conn`/`Stat` stay within the ISP method limit.
-`gpool.CopyRows` is structurally identical to `pgx.CopyFromSource`, so the source
-passes straight through with no adapter.
+`CopyFrom` learns the column types and starts the COPY in one round trip (Parse +
+Describe of a SELECT over the columns, Sync, then the COPY query behind it), then
+streams text format via `codec.EncodeText` in 64 KiB CopyData chunks. A source error
+sends CopyFail. `SendBatch` pipelines behind one Sync (one implicit transaction, as
+with pgx): one round trip when every statement is cached, two when some must be
+described first.
 
 ## Per-connection caches are the memory cost
 
-`Config.StatementCacheCapacity` / `DescriptionCacheCapacity` bound pgx's two
-per-connection LRU caches, which it preallocates at 512 each. Default 64. Was 57% of
-the pool's heap; see `mem:scale`. `cacheCapacity` resolves the default itself so
+`Config.StatementCacheCapacity` bounds the session's LRU of named statements
+(`gpool_<base36>`), nothing preallocated. Default 64. An eviction queues a Close sent
+ahead of the next Parse, so it costs no round trip. `DescriptionCacheCapacity` is
+inert, kept for source compatibility. Under pgx the two caches were 57% of the heap
+(`mem:scale`); a pooled connection is now ~11 KiB against pgxpool's ~82. `cacheCapacity` resolves the default itself so
 `parse()` gives the same answer whether or not `withDefaults()` ran first.
 
 ## Pooling mode is usage, not config
@@ -176,17 +182,18 @@ Session usage needs `ResetQuery`, which trades the cache away (below).
 `replication=database` + `CopyBoth` after `START_REPLICATION` + one active walsender
 per slot = inherently session-scoped, no transaction boundary to release at.
 PgBouncer does not proxy replication connections. The subscriber's *control*
-connection is ordinary and uses `ExecParams` (unnamed statements), so it holds no
-named prepared statements and is pooler-safe.
+connection is ordinary and uses `wire.QueryText` (unnamed statements), so it holds
+no named prepared statements and is pooler-safe.
 
 ## ResetQuery couples to query exec mode
 
-`DISCARD ALL` deallocates the server's prepared statements. pgx's default
-`QueryExecModeCacheStatement` keeps referencing the dropped names → `SQLSTATE 26000`
-on the connection's next use. `Config.parse` therefore forces
-`pgx.QueryExecModeExec` when `ResetQuery != ""` — unnamed statement, parameters still
-bound server-side. Do **not** reach for `QueryExecModeSimpleProtocol`, which
-interpolates client-side.
+`DISCARD ALL` deallocates the server's prepared statements. A cache would keep
+binding the dropped names → `SQLSTATE 26000` on the connection's next use.
+`Config.parse` therefore sets `settings.statements = 0` when `ResetQuery != ""`: every
+query parses the unnamed statement, parameters still bound server-side; after the
+reset `forgetStatements` clears anything cached. Never interpolate values
+client-side. `Exec` with no arguments uses the simple protocol (several statements
+allowed); with arguments it binds.
 
 Found by benchmark, not by unit test. Cost is a full extra round trip per release
 (~2x per-query latency), so ResetQuery stays empty by default.
@@ -196,7 +203,28 @@ Found by benchmark, not by unit test. Cost is a full extra round trip per releas
 `Rows`/`Row` from a *pool-level* call own the connection and release it on close.
 From a *conn-level* or *tx-level* call they own nothing.
 
-`pgRow` wraps `pgx.Rows`, not `pgx.Row`. `pgx.Row` exposes only `Scan` and closes the
-result as a side effect, so a caller who declines to read would have no way to close
-it — and returning that connection pooled it mid-query (`conn busy`). Found by
-integration test.
+`pgRow` wraps a `resultSet` (a `cursor`), so a caller who declines to read can still
+close it; returning that connection unclosed pooled it mid-query (`conn busy`, found
+by integration test under pgx). `queryRow` allocates `pgRow` and its `cursor`
+together (`cursorRow`). A cursor streams: each `Next` reads one DataRow whose values
+alias the read buffer.
+
+## The driver underneath
+
+`session` (one per connection) runs every exchange between `begin` and `finish`;
+one left open is what `busy()` reports. `begin` takes a `wire.Guard` from
+`conn.Watch(ctx)`: a ctx deadline becomes the socket deadline, a cancellable ctx
+gets a `context.AfterFunc` that moves the deadline into the past. `Guard.Done`
+turns a timeout into the ctx's error, sends a CancelRequest from a goroutine, and
+closes the connection, because its stream position is unknown. A Background ctx
+costs nothing.
+
+`wire.awaitExpiry`: the socket notices a deadline before the ctx timer fires, so an
+exchange used to fail with `DeadlineExceeded` while `ctx.Err()` was still nil, and a
+caller checking `ctx.Err()` to tell its own cancellation from a failure counted the
+end of its run as errors. Found by `TestSoakSustainedQueryLoad` (449 "failures").
+Done now waits for the ctx once the deadline has passed.
+
+`WaitForNotification` is the one read that may end without harm: on an idle
+connection only asynchronous messages arrive and the buffer consumes whole
+messages, so it sets a read deadline and does not abort.

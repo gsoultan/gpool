@@ -25,15 +25,17 @@ behaviour:
 | `pkg/gpool/cdc` | `Subscriber` = `Stream` + `TableManager` + `Close`, plus `EventStream`, `Event`, `Position`, and the optional capability `ReplicationManager` |
 | `pkg/pooling` | The pooling engine: capacity, lock-striped idle buckets, reaper, lifecycle, statistics |
 | `pkg/sqldriver` | Shared pooling for any `database/sql` driver (standard library only) |
-| `pkg/vendors/postgres/pool` | PostgreSQL pool implementation (`pgx/v5`) |
-| `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation (`pglogrepl`) |
+| `pkg/vendors/postgres/pool` | PostgreSQL pool implementation, on gpool's own driver |
+| `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation, with its own `pgoutput` decoder |
+| `pkg/vendors/postgres/wire` | The PostgreSQL protocol: connect, TLS, SCRAM-SHA-256/MD5, cancel, messages (standard library only) |
+| `pkg/vendors/postgres/codec` | PostgreSQL types to and from Go values, binary where the server allows it |
 | `vendors/mysql/cdc` | MySQL and MariaDB binary-log implementation (`go-mysql`), its own module |
 
 ### Supported databases
 
 | Database | Module | Driver | CDC |
 | :--- | :--- | :--- | :--- |
-| PostgreSQL | `github.com/gsoultan/gpool` | `pgx/v5` | ✅ logical replication |
+| PostgreSQL | `github.com/gsoultan/gpool` | built in, no dependency | ✅ logical replication |
 | MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
 | MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
 | SQL Server | `github.com/gsoultan/gpool/vendors/mssql` | `microsoft/go-mssqldb` | ✅ change tables |
@@ -212,18 +214,43 @@ advances. Scan what you need inside the loop body.
 | `ResetQueryTimeout` | `5s` | |
 | `ConnectTimeout` | `10s` | Used when the caller's context has no earlier deadline |
 | `StatementCacheCapacity` | `64` | Per-connection prepared-statement cache; `DisableCache` turns it off |
-| `DescriptionCacheCapacity` | `64` | Per-connection statement-description cache |
-| `BeforeConnect` | `nil` | Adjust the config per connection, e.g. credential rotation |
-| `AfterConnect` | `nil` | Register types or run `SET`; an error discards the connection |
+| `DescriptionCacheCapacity` | — | No effect: a prepared statement carries its own description. Kept so existing configs compile |
+| `BeforeConnect` | `nil` | `func(*wire.Config) error`: adjust the config per connection, e.g. credential rotation |
+| `AfterConnect` | `nil` | `func(ctx, gpool.Conn) error`: run `SET` and the like; an error discards the connection |
 
 A connection that is closed, has outlived its bounds, or fails its reset query is destroyed rather
 than returned to the pool.
 
-The two cache capacities are the largest per-connection memory cost. pgx defaults both to 512 and
-preallocates each one's map at that size, which measured as 57% of the pool's entire heap. gpool
-defaults them to 64 — within 10% of the floor while still caching a typical service's query set.
-Raise it if your query variety is wide; lower it if connection count matters more. See
-[Footprint at scale](#-footprint-at-scale).
+The statement cache is the main per-connection cost that grows with use: each entry is a
+statement's parameter types and column descriptions. The default of 64 covers a typical service's
+query set; raise it if your query variety is wide. Nothing is preallocated, so an unused capacity
+costs nothing. See [Footprint at scale](#-footprint-at-scale).
+
+### The PostgreSQL driver
+
+gpool speaks the PostgreSQL protocol itself (`pkg/vendors/postgres/wire`, standard library only)
+and converts types itself (`pkg/vendors/postgres/codec`). It depends on neither pgx nor pglogrepl,
+and `go.mod` requires nothing. What it covers:
+
+- **Connection strings** as libpq reads them for a single host: URL or keyword/value form, the `PG*`
+  environment variables (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, …), and the password file.
+- **TLS** by `sslmode`: `disable`, `prefer` (falls back to plaintext, as libpq does), `require`,
+  `verify-ca`, `verify-full`, with `sslrootcert`, `sslcert` and `sslkey`. `allow` connects in
+  plaintext and, unlike libpq, does not retry with TLS.
+- **Authentication**: SCRAM-SHA-256 (the server's signature is verified), MD5, and cleartext.
+- **Cancellation**: a context that ends mid-query sends a CancelRequest and closes the connection,
+  so the pool never reuses one whose state is unknown. `errors.Is(err, context.DeadlineExceeded)`
+  holds.
+- **Types**: results come back in binary for `bool`, `bytea`, integers, floats, `date`, `time`,
+  timestamps, `interval`, `uuid` and arrays of those, and in text otherwise. Parameters are encoded
+  for the type the server resolved. `database/sql`'s `Scanner` and `Valuer` both work, as do
+  `sql.Null*`, pointers for NULL, `json.RawMessage`, and `encoding.TextMarshaler`.
+- **Errors**: a server error is `*wire.Error`, with the SQLSTATE in `Code` and `SQLState()`.
+  `ErrNoRows` is `sql.ErrNoRows`.
+
+What it does not do: register custom types (a type the codec does not know is scanned from its
+text form, into a `string`, `[]byte` or a `Scanner`), multiple hosts in one connection string,
+GSSAPI, or `COPY ... TO STDOUT` through `Exec`.
 
 ### Pooling modes and prepared statements
 
@@ -236,8 +263,8 @@ makes the PgBouncer equivalents a matter of usage rather than configuration:
 | transaction | `Acquire` → `Begin` → `Commit` → `Release` | ✅ cached per connection |
 | session | `Acquire` once, hold it, `Release` at the end — plus `ResetQuery: "DISCARD ALL"` | ❌ traded away, see below |
 
-**Prepared statements work by default.** gpool caches them per connection
-(`pgx.QueryExecModeCacheStatement`), and because a connection is only ever handed to one caller at a
+**Prepared statements work by default.** gpool prepares each distinct query once per connection
+under a name of its own and binds that name afterwards, and because a connection is only ever handed to one caller at a
 time, the cache stays valid across reuse. Nothing about pooling by itself invalidates it — this is
 the advantage of pooling in-process over a wire proxy, where a client's statement names follow it
 onto whichever backend it lands on.
@@ -255,16 +282,16 @@ if the connection were simply discarded. A cleanup that fails means the state is
 connection is destroyed rather than reused.
 
 **`ResetQuery` is the session-mode option, and it costs you prepared statements.**
-`DISCARD ALL` deallocates the server's prepared statements, so gpool switches the connection to
-`pgx.QueryExecModeExec` — parameters still bound server-side, but nothing cached by name. Without
-that switch the driver's cache goes stale and the next query fails with `SQLSTATE 26000`. It also
+`DISCARD ALL` deallocates the server's prepared statements, so with a reset query gpool keeps no
+statement cache: every query is parsed into the unnamed statement — parameters still bound
+server-side, but nothing cached by name. Otherwise the cache would go stale and the next query
+would fail with `SQLSTATE 26000`. It also
 costs a full extra round trip on every release, roughly doubling per-query latency.
 
 Set `ResetQuery` only when callers hold connections long enough to accumulate session state
 (`SET`, `LISTEN`, temp tables, `WITH HOLD` cursors). For statement- and transaction-scoped usage
 the rollback gate above is already sufficient, and leaving `ResetQuery` empty is both faster and
-keeps prepared statements. `BeforeConnect` can override the execution mode if your reset query
-preserves them.
+keeps prepared statements.
 
 ## ⚡ CDC Streaming
 
@@ -627,8 +654,8 @@ Three further things to know:
 - **Leave `ResetQuery` empty.** PgBouncer already runs `server_reset_query` itself;
   adding gpool's own is a second round trip that buys nothing.
 - **Prepared statements work.** The proxy replays a client's `Parse` onto
-  whichever backend the next transaction lands on, so pgx's default execution
-  mode is fine.
+  whichever backend the next transaction lands on, so gpool's statement cache
+  is fine.
 - **`Notifier` will not work** through transaction mode. A `LISTEN` needs a stable
   session, which is precisely what transaction pooling refuses to give.
 - **CDC must bypass PgBouncer entirely.** It does not proxy replication
@@ -1018,42 +1045,55 @@ go test -bench=. ./benchmarks/
 A pooler's job is to absorb far more callers than it holds connections, so those two numbers are
 measured separately. Apple M5 Pro, PostgreSQL 17 over loopback, `GOMAXPROCS=15`.
 
-**Per connection.** Measured by `TestMemoryPerPooledConnection`, which holds every connection open
-and reads steady-state heap:
+**Per connection.** Measured by `TestMemoryPerPooledConnection` and `TestMemoryPerPgxConnection`,
+which hold every connection open and read steady-state heap. These two rows were measured on a
+4-core Linux VM against PostgreSQL on loopback, not on the machine above:
 
-| `StatementCacheCapacity` | KiB / connection | Projected at 5,000 connections |
+| Pool | KiB / connection | Projected at 5,000 connections |
 | :--- | ---: | ---: |
-| `DisableCache` | 25.8 | 126 MiB |
-| 16 | 26.1 | 128 MiB |
-| **64 (default)** | **28.5** | **139 MiB** |
-| 128 | 36.2 | 177 MiB |
-| 512 (pgx's default) | 71.2 | 348 MiB |
+| gpool (own driver, defaults) | 10–12 | 53 MiB |
+| `pgxpool` (its defaults) | 81–83 | 400 MiB |
 
 **Per caller: nothing.** The pool adds exactly one goroutine — the background maintainer —
 regardless of connection count or client concurrency, and `Close` reclaims it. Verified by
 `TestGoroutineCostAtScale`.
 
 Note the two readings of "5,000 connections". Five thousand *callers* over a bounded pool is the
-normal shape and costs `MaxConns × 28.5 KiB` — about **3 MiB for a 100-connection pool**. Five
-thousand *actual backend connections* is the 139 MiB row above, and is usually the wrong design:
+normal shape and costs `MaxConns × 11 KiB` — about **1.1 MiB for a 100-connection pool**. Five
+thousand *actual backend connections* is the 53 MiB row above, and is usually the wrong design:
 PostgreSQL itself allocates several MiB of backend memory per connection, so the server is the
 binding constraint long before gpool is.
 
 ## 📈 Benchmarks
 
-`benchmarks/` compares gpool against `pgxpool`, `database/sql`, and PgBouncer on the same workload,
-with pool capacity matched so the comparison measures the driver rather than queueing.
+`benchmarks/` is a module of its own, the only place pgx and pglogrepl appear: they are what gpool
+is measured against. It compares gpool with `pgxpool`, `database/sql`, and PgBouncer, with pool
+capacity matched on both sides so the comparison measures the driver rather than queueing.
 
-**Query path** — `-benchtime=20000x`, default parallelism, capacity `max(4, GOMAXPROCS)` on both:
+**Driver against pgx** — `BenchmarkDriver*`, 4-core Linux VM, PostgreSQL 17 on loopback (so the
+client and the server share the four cores), runs interleaved and the median reported:
 
-| Benchmark | ns/op |
-| :--- | ---: |
-| `PgxPool` | 45,956 – 47,229 |
-| `Stdlib` | 46,882 – 48,973 |
-| `GpoolQueryRow` | 46,393 – 47,096 |
+| Workload | gpool | pgx | |
+| :--- | ---: | ---: | :--- |
+| One row, one parameter, one connection | 47 µs · 6 allocs | 64 µs · 8 allocs | gpool 26% faster |
+| 100 rows × 4 columns, one connection | 136 µs · 8.4 KB · 207 allocs | 171 µs · 17.4 KB · 761 allocs | gpool 20% faster |
+| 100 rows × 4 columns, 4 callers on 4 connections | 38 µs | 53 µs | gpool 28% faster |
+| One row, 64 callers on 32 connections | 7.5 µs | 9.2 µs | gpool 18% faster |
+| One row, 4 callers on 4 connections | 9.7 µs | 8.4 µs | **pgx 13% faster** |
 
-A query is dominated by the network round trip, so all three land in the same band across repeated
-runs. gpool adds no measurable overhead to the query itself.
+The last row is the one gpool loses, and it is not CPU: both drivers make the same system calls
+(one write and one read per query, checked with `strace`) and gpool uses less CPU per query, but on
+this four-core box it leaves more of it idle. It is a scheduling effect of a client and a server
+contending for the same few cores, and it reverses as soon as there are more callers than
+connections. Treat it as unresolved rather than explained away.
+
+**CDC decoding against pglogrepl** — the same `pgoutput` UPDATE (six columns, both images, a NULL
+and an unchanged TOASTed value), decoded into gpool's event: 810 ns, 956 B, 21 allocs with gpool's
+decoder; 1,500 ns, 1,156 B, 48 allocs through pglogrepl (`BenchmarkDecodeUpdate`,
+`BenchmarkPglogreplDecodeUpdate`).
+
+**Binary size** — a program that opens a pool and runs one query, built with `-trimpath -ldflags="-s
+-w"`: 5.3 MiB with gpool, 8.9 MiB with `pgxpool`.
 
 **Pool mechanics** — what gpool actually controls, `-benchtime=200000x`:
 

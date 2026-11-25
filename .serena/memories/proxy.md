@@ -75,10 +75,9 @@ needs a client must use it, never import a driver;
 `TestModuleDependsOnNoPostgreSQLDriver` fails if one appears in `go.mod`.
 
 There is no `go.sum`, on purpose. The one dependency is the working tree
-(`replace ../..`), which needs no checksum. `go mod tidy` writes the file back
-with the core module's pgx and pglogrepl checksums; delete it again, the same
-test says so. The core module still requires both for the PostgreSQL vendor,
-so `go list -m all` here still names them, though nothing of them is compiled.
+(`replace ../..`), which needs no checksum, and since the core module dropped
+pgx and pglogrepl it requires nothing, so `go list -m all` here names only the
+proxy and the core module.
 
 Because a client that shares code with the server could share its mistakes,
 `TestProxyServesPsql` runs `psql` (libpq) as a program against the proxy. It

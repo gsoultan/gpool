@@ -17,8 +17,9 @@ Each of these was a real defect in this codebase. They outrank convenience.
    clears the flag, so the original owner's second release corrupts the new owner's
    state. This is why `connWrapper`, `pgRows`, `pgRow`, `pgTx` are allocated per use.
 
-4. **One goroutine owns a connection.** `pgconn.PgConn.lock()` is a debug assertion
-   (`switch pgConn.status`), not a mutex — it provides no memory synchronisation.
+4. **One goroutine owns a connection.** `wire.Conn` has no lock; `session.open` marks
+   an exchange in progress for the pool's recycle gate and provides no memory
+   synchronisation.
 
 5. **Caller-owned maps and slices are freshly allocated.** CDC event maps were pooled
    and cleared when the loop body returned, silently emptying any retained event.

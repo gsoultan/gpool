@@ -15,8 +15,12 @@ unimportable and is the reason the tree was restructured.
   so single-database callers are unaffected.
 - `pkg/gpool/cdc` — `Subscriber` composed from `Stream` + `TableManager` +
   `ReplicationManager` + `Close`. Also `EventStream`, `Event`, `Op`.
-- `pkg/vendors/postgres/pool` — pgx/v5.
-- `pkg/vendors/postgres/cdc` — pglogrepl.
+- `pkg/vendors/postgres/wire` — the protocol: connect, TLS, SCRAM/MD5, guard
+  (context → deadline + CancelRequest), simple queries, CopyBoth. Stdlib only.
+- `pkg/vendors/postgres/codec` — types ↔ Go values; binary result formats where
+  known (`ResultFormat`), parameters encoded for the server-described OID.
+- `pkg/vendors/postgres/pool` — sessions, statement cache, cursors on `wire`.
+- `pkg/vendors/postgres/cdc` — logical replication on `wire`, own pgoutput decoder.
 - `vendors/mssql/cdc` — SQL Server change tables, a package *inside* the pool
   vendor's module because it needs no dependency the pool lacks. The third CDC
   vendor and the first that polls rather than tails. See `mem:cdc_mssql`.
@@ -44,6 +48,7 @@ unimportable and is the reason the tree was restructured.
   start is worse).
 - Adding a vendor must need zero edits to `pkg/gpool`.
 
-Dependencies are deliberately minimal: pgx/v5 and pglogrepl, nothing else.
+The core module has no dependencies. pgx and pglogrepl were replaced by `wire`,
+`codec` and the pgoutput decoder; they survive only in `benchmarks/`, its own module.
 `golang.org/x/sync` was dropped when the semaphore gave way to a token channel
 (`mem:scale`). Adding one back needs justification.

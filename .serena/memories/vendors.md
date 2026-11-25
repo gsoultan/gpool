@@ -13,7 +13,7 @@ to commit; it only affects building and testing that module in place.
 
 ## Two kinds of vendor
 
-- **Native** (PostgreSQL/pgx): implements `pooling.Driver[*pgConn]` directly and
+- **Native** (PostgreSQL, gpool's own driver in `wire` + `codec`): implements `pooling.Driver[*pgConn]` directly and
   owns its own result types.
 - **database/sql** (MySQL, MariaDB, and the ones to come): shares
   `pkg/sqldriver`, which is stdlib-only and lives in the *core* module. A vendor

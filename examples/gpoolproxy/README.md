@@ -245,9 +245,8 @@ the Go runtime, `crypto/tls` and `net`; a Go program that only imports those is
 tests and the benchmark connect with `wireClient` in `client_test.go`, which is
 the proxy's own login and a few hand-written messages; `go.mod` requires only
 the core module, for `pkg/pooling`, and there is no `go.sum` because nothing is
-fetched. The core module itself still requires pgx and pglogrepl for its
-PostgreSQL vendor, so `go list -m all` names them here, but none of their code
-is compiled into the proxy or its tests. `psql` is run as a program by one test,
+fetched; `go list -m all` names the proxy and the core module and nothing
+else. `psql` is run as a program by one test,
 so that a client the proxy did not write still has to accept it.
 
 The throughput and CPU tables above were measured with pgx as the load

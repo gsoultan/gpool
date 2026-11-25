@@ -2,10 +2,13 @@
 
 ## Layout
 
-- `pkg/**/​*_test.go` — unit, no database. Mocks satisfy `pgx.Rows` / `pgx.Tx` /
+- `pkg/**/​*_test.go` — unit, no database. Mocks satisfy `resultSet` / `transaction` /
   `gpool.Pool` / `cdc.Subscriber` in `mock_test.go`.
 - `integration/` — real server, `t.Skip` unless `DATABASE_URL` is set.
-- `benchmarks/` — gpool vs pgxpool vs database/sql vs PgBouncer, same workload.
+- `benchmarks/` — own module (the only one with pgx and pglogrepl). gpool vs pgxpool
+  vs database/sql vs PgBouncer; `BenchmarkDriver*` is the driver comparison;
+  `BenchmarkPglogreplDecodeUpdate` pairs with `cdc.BenchmarkDecodeUpdate` on the same
+  bytes. Run interleaved: on a small box the run-to-run spread exceeds some gaps.
 
 Table-driven. Mock interfaces, never concrete types. Every fixed bug gets a
 regression test whose comment states the old failure mode — that comment is the
