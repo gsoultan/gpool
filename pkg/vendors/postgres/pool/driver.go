@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
 )
 
 // connCloseTimeout bounds the graceful close of a single connection.

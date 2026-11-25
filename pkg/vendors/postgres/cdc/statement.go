@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
+	"github.com/gsoultan/caduceus/wire"
 )
 
 // verifyTableSQL checks whether a table is covered by a publication. The schema

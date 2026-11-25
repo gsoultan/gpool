@@ -74,10 +74,9 @@ login, with the extended-protocol messages written out by hand. A test that
 needs a client must use it, never import a driver;
 `TestModuleDependsOnNoPostgreSQLDriver` fails if one appears in `go.mod`.
 
-There is no `go.sum`, on purpose. The one dependency is the working tree
-(`replace ../..`), which needs no checksum, and since the core module dropped
-pgx and pglogrepl it requires nothing, so `go list -m all` here names only the
-proxy and the core module.
+The one direct dependency is the working tree (`replace ../..`). The core module
+requires caduceus, so `go.sum` holds caduceus's checksums and nothing else; no
+PostgreSQL client library from outside the project appears in it.
 
 Because a client that shares code with the server could share its mistakes,
 `TestProxyServesPsql` runs `psql` (libpq) as a program against the proxy. It

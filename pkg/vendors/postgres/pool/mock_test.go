@@ -6,7 +6,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
+	"github.com/gsoultan/caduceus/wire"
 )
 
 // fakeRows is a scripted resultSet that counts how often it is closed, which is

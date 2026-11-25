@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
+	"github.com/gsoultan/caduceus/wire"
 )
 
 // Close used to nil the driver handle and then dereference it on the next call,

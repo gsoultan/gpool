@@ -15,12 +15,17 @@ unimportable and is the reason the tree was restructured.
   so single-database callers are unaffected.
 - `pkg/gpool/cdc` — `Subscriber` composed from `Stream` + `TableManager` +
   `ReplicationManager` + `Close`. Also `EventStream`, `Event`, `Op`.
-- `pkg/vendors/postgres/wire` — the protocol: connect, TLS, SCRAM/MD5, guard
-  (context → deadline + CancelRequest), simple queries, CopyBoth. Stdlib only.
-- `pkg/vendors/postgres/codec` — types ↔ Go values; binary result formats where
-  known (`ResultFormat`), parameters encoded for the server-described OID.
-- `pkg/vendors/postgres/pool` — sessions, statement cache, cursors on `wire`.
-- `pkg/vendors/postgres/cdc` — logical replication on `wire`, own pgoutput decoder.
+- `github.com/gsoultan/caduceus` — the PostgreSQL driver, its own repository and
+  module, stdlib only (no database/sql, pgx or pglogrepl). `wire` is the protocol
+  (connect, TLS, SCRAM/MD5, guard: context → deadline + CancelRequest, CopyBoth);
+  `codec` converts types (binary results where known, parameters for the
+  server-described OID); `caduceus.Conn` runs queries, batches, COPY and
+  transactions with an LRU statement cache; `replication` decodes pgoutput.
+- `pkg/vendors/postgres/pool` — adapter: `session` wraps `*caduceus.Conn` and its
+  `*wire.Conn`; `bindable` resolves `driver.Valuer` args, which caduceus does not
+  know, before they are bound.
+- `pkg/vendors/postgres/cdc` — logical replication: the stream loop, slot and
+  publication DDL, positions; `replication.Decoder` does the decoding.
 - `vendors/mssql/cdc` — SQL Server change tables, a package *inside* the pool
   vendor's module because it needs no dependency the pool lacks. The third CDC
   vendor and the first that polls rather than tails. See `mem:cdc_mssql`.
@@ -48,7 +53,7 @@ unimportable and is the reason the tree was restructured.
   start is worse).
 - Adding a vendor must need zero edits to `pkg/gpool`.
 
-The core module has no dependencies. pgx and pglogrepl were replaced by `wire`,
-`codec` and the pgoutput decoder; they survive only in `benchmarks/`, its own module.
+The core module requires only caduceus, which requires nothing. pgx and pglogrepl
+survive only in `benchmarks/`, its own module, and in caduceus's `benchmarks/`.
 `golang.org/x/sync` was dropped when the semaphore gave way to a token channel
 (`mem:scale`). Adding one back needs justification.

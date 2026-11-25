@@ -25,17 +25,15 @@ behaviour:
 | `pkg/gpool/cdc` | `Subscriber` = `Stream` + `TableManager` + `Close`, plus `EventStream`, `Event`, `Position`, and the optional capability `ReplicationManager` |
 | `pkg/pooling` | The pooling engine: capacity, lock-striped idle buckets, reaper, lifecycle, statistics |
 | `pkg/sqldriver` | Shared pooling for any `database/sql` driver (standard library only) |
-| `pkg/vendors/postgres/pool` | PostgreSQL pool implementation, on gpool's own driver |
-| `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation, with its own `pgoutput` decoder |
-| `pkg/vendors/postgres/wire` | The PostgreSQL protocol: connect, TLS, SCRAM-SHA-256/MD5, cancel, messages (standard library only) |
-| `pkg/vendors/postgres/codec` | PostgreSQL types to and from Go values, binary where the server allows it |
+| `pkg/vendors/postgres/pool` | PostgreSQL pool implementation, on the [caduceus](https://github.com/gsoultan/caduceus) driver |
+| `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation, on caduceus's `pgoutput` decoder |
 | `vendors/mysql/cdc` | MySQL and MariaDB binary-log implementation (`go-mysql`), its own module |
 
 ### Supported databases
 
 | Database | Module | Driver | CDC |
 | :--- | :--- | :--- | :--- |
-| PostgreSQL | `github.com/gsoultan/gpool` | built in, no dependency | ✅ logical replication |
+| PostgreSQL | `github.com/gsoultan/gpool` | [caduceus](https://github.com/gsoultan/caduceus), pure Go | ✅ logical replication |
 | MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
 | MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
 | SQL Server | `github.com/gsoultan/gpool/vendors/mssql` | `microsoft/go-mssqldb` | ✅ change tables |
@@ -215,7 +213,7 @@ advances. Scan what you need inside the loop body.
 | `ConnectTimeout` | `10s` | Used when the caller's context has no earlier deadline |
 | `StatementCacheCapacity` | `64` | Per-connection prepared-statement cache; `DisableCache` turns it off |
 | `DescriptionCacheCapacity` | — | No effect: a prepared statement carries its own description. Kept so existing configs compile |
-| `BeforeConnect` | `nil` | `func(*wire.Config) error`: adjust the config per connection, e.g. credential rotation |
+| `BeforeConnect` | `nil` | `func(*wire.Config) error` (`github.com/gsoultan/caduceus/wire`): adjust the config per connection, e.g. credential rotation |
 | `AfterConnect` | `nil` | `func(ctx, gpool.Conn) error`: run `SET` and the like; an error discards the connection |
 
 A connection that is closed, has outlived its bounds, or fails its reset query is destroyed rather
@@ -228,9 +226,12 @@ costs nothing. See [Footprint at scale](#-footprint-at-scale).
 
 ### The PostgreSQL driver
 
-gpool speaks the PostgreSQL protocol itself (`pkg/vendors/postgres/wire`, standard library only)
-and converts types itself (`pkg/vendors/postgres/codec`). It depends on neither pgx nor pglogrepl,
-and `go.mod` requires nothing. What it covers:
+gpool runs PostgreSQL on [caduceus](https://github.com/gsoultan/caduceus), a driver written from
+the protocol up in pure Go by the same author: `caduceus/wire` speaks the protocol, `caduceus/codec`
+converts types, and `caduceus/replication` decodes logical replication. caduceus imports nothing
+outside the standard library, so gpool's `go.mod` requires caduceus and nothing else: no pgx, no
+pglogrepl. caduceus is usable on its own, for an application that wants one connection without a
+pool. What it covers:
 
 - **Connection strings** as libpq reads them for a single host: URL or keyword/value form, the `PG*`
   environment variables (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, …), and the password file.
@@ -243,8 +244,10 @@ and `go.mod` requires nothing. What it covers:
   holds.
 - **Types**: results come back in binary for `bool`, `bytea`, integers, floats, `date`, `time`,
   timestamps, `interval`, `uuid` and arrays of those, and in text otherwise. Parameters are encoded
-  for the type the server resolved. `database/sql`'s `Scanner` and `Valuer` both work, as do
-  `sql.Null*`, pointers for NULL, `json.RawMessage`, and `encoding.TextMarshaler`.
+  for the type the server resolved. `database/sql`'s `Scanner` and `Valuer` both work through
+  gpool, as do `sql.Null*`, pointers for NULL, `json.RawMessage`, and `encoding.TextMarshaler`.
+  (caduceus itself does not import `database/sql`; gpool resolves a `driver.Valuer` before handing
+  the argument over, and a `Scanner` matches caduceus's own `codec.Scanner` as it is.)
 - **Errors**: a server error is `*wire.Error`, with the SQLSTATE in `Code` and `SQLState()`.
   `ErrNoRows` is `sql.ErrNoRows`.
 
@@ -1088,9 +1091,8 @@ contending for the same few cores, and it reverses as soon as there are more cal
 connections. Treat it as unresolved rather than explained away.
 
 **CDC decoding against pglogrepl** — the same `pgoutput` UPDATE (six columns, both images, a NULL
-and an unchanged TOASTed value), decoded into gpool's event: 810 ns, 956 B, 21 allocs with gpool's
-decoder; 1,500 ns, 1,156 B, 48 allocs through pglogrepl (`BenchmarkDecodeUpdate`,
-`BenchmarkPglogreplDecodeUpdate`).
+and an unchanged TOASTed value), decoded into the same two column maps: 855 ns, 952 B, 20 allocs
+with caduceus's decoder; 1,470 ns, 1,156 B, 48 allocs through pglogrepl (`BenchmarkDecodeUpdate`).
 
 **Binary size** — a program that opens a pool and runs one query, built with `-trimpath -ldflags="-s
 -w"`: 5.3 MiB with gpool, 8.9 MiB with `pgxpool`.

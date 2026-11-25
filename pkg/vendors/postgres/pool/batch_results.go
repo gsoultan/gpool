@@ -5,12 +5,14 @@ package pool
 import (
 	"sync/atomic"
 
+	"github.com/gsoultan/caduceus"
+
 	"github.com/gsoultan/gpool/pkg/gpool"
 )
 
 // batchResults reads the replies to a pipelined batch.
 type batchResults struct {
-	reader *batchReader
+	reader *caduceus.BatchResults
 	closed atomic.Bool
 }
 
@@ -22,15 +24,11 @@ func (r *batchResults) Exec() (gpool.Result, error) {
 		return nil, ErrBatchClosed
 	}
 
-	cursor, err := r.reader.statement()
+	tag, err := r.reader.Exec()
 	if err != nil {
 		return nil, err
 	}
-	cursor.Close()
-	if cursor.err != nil {
-		return nil, cursor.err
-	}
-	return pgResult{tag: cursor.tag}, nil
+	return pgResult{tag: tag}, nil
 }
 
 // Query reads the next reply as a row set. The rows own nothing: the batch's
@@ -40,7 +38,7 @@ func (r *batchResults) Query() (gpool.Rows, error) {
 		return nil, ErrBatchClosed
 	}
 
-	cursor, err := r.reader.statement()
+	cursor, err := r.reader.Query()
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +51,7 @@ func (r *batchResults) QueryRow() gpool.Row {
 		return errorRow{err: ErrBatchClosed}
 	}
 
-	cursor, err := r.reader.statement()
+	cursor, err := r.reader.Query()
 	if err != nil {
 		return errorRow{err: err}
 	}
@@ -67,7 +65,7 @@ func (r *batchResults) Close() error {
 	if !r.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	return r.reader.close()
+	return r.reader.Close()
 }
 
 // failedBatchResults reports a failure that happened before anything was sent,

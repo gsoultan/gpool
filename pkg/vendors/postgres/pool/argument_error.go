@@ -2,17 +2,12 @@
 
 package pool
 
-import "fmt"
+import "github.com/gsoultan/caduceus"
 
 // ArgumentError reports an argument that could not be encoded for its
 // parameter. Nothing was sent; the connection is unaffected.
-type ArgumentError struct {
-	Index int
-	Err   error
-}
+type ArgumentError = caduceus.ArgumentError
 
-func (e *ArgumentError) Error() string {
-	return fmt.Sprintf("gpool/postgres: argument $%d: %v", e.Index+1, e.Err)
-}
-
-func (e *ArgumentError) Unwrap() error { return e.Err }
+// ArgumentCountError reports a call with more or fewer arguments than the
+// statement has parameters.
+type ArgumentCountError = caduceus.ArgumentCountError

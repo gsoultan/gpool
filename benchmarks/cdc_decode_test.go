@@ -6,15 +6,49 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/gsoultan/caduceus/replication"
 	"github.com/jackc/pglogrepl"
 )
 
-// BenchmarkPglogreplDecodeUpdate decodes the bytes BenchmarkDecodeUpdate in
-// pkg/vendors/postgres/cdc decodes, the way gpool's CDC decoder did while it was
-// built on pglogrepl: parse the message into pglogrepl's structs, then build the
-// event's two column maps from them. Both sides end with the same maps of
-// strings, so the difference is the decoding alone.
-func BenchmarkPglogreplDecodeUpdate(b *testing.B) {
+// The same UPDATE decoded both ways, ending in the same two maps of strings,
+// so the difference is the decoding alone.
+
+func relationRecord(columns []string) []byte {
+	out := binary.BigEndian.AppendUint32([]byte{'R'}, 7)
+	out = append(out, "public\x00accounts\x00d"...)
+	out = binary.BigEndian.AppendUint16(out, uint16(len(columns)))
+	for _, name := range columns {
+		out = append(out, 0)
+		out = append(append(out, name...), 0)
+		out = binary.BigEndian.AppendUint32(out, 25)
+		out = binary.BigEndian.AppendUint32(out, 0xFFFFFFFF)
+	}
+	return out
+}
+
+func BenchmarkDecodeUpdate(b *testing.B) {
+	columns := []string{"id", "email", "updated_at", "deleted_at", "settings", "notes"}
+	b.Run("caduceus", func(b *testing.B) {
+		d := replication.NewDecoder()
+		if _, _, err := d.Decode(relationRecord(columns)); err != nil {
+			b.Fatal(err)
+		}
+		record := updateRecord()
+		b.ReportAllocs()
+		for b.Loop() {
+			change, ok, err := d.Decode(record)
+			if err != nil || !ok || change.After["email"] != "new@example.com" {
+				b.Fatal(change, err)
+			}
+			_ = replication.LSN(1).String()
+		}
+	})
+	b.Run("pglogrepl", benchmarkPglogreplDecodeUpdate)
+}
+
+// benchmarkPglogreplDecodeUpdate parses the message into pglogrepl's structs,
+// then builds the two column maps from them.
+func benchmarkPglogreplDecodeUpdate(b *testing.B) {
 	columns := []string{"id", "email", "updated_at", "deleted_at", "settings", "notes"}
 	relation := &pglogrepl.RelationMessage{RelationID: 7, Namespace: "public", RelationName: "accounts"}
 	for _, name := range columns {
@@ -35,7 +69,7 @@ func BenchmarkPglogreplDecodeUpdate(b *testing.B) {
 	}
 }
 
-// columnMap is the map-building half of the decoder gpool had on pglogrepl.
+// columnMap builds a change's column map from pglogrepl's tuple.
 func columnMap(rel *pglogrepl.RelationMessage, tuple *pglogrepl.TupleData) map[string]any {
 	if tuple == nil {
 		return nil
@@ -53,7 +87,8 @@ func columnMap(rel *pglogrepl.RelationMessage, tuple *pglogrepl.TupleData) map[s
 	return data
 }
 
-// updateRecord is the same UPDATE as benchUpdate in the cdc package.
+// updateRecord is an UPDATE under REPLICA IDENTITY FULL, with a NULL and an
+// unchanged TOASTed column.
 func updateRecord() []byte {
 	text := func(value string) []byte {
 		out := binary.BigEndian.AppendUint32([]byte{'t'}, uint32(len(value)))

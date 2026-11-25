@@ -1,5 +1,11 @@
 # Pool internals
 
+
+> The session, statement cache, cursor, batch and COPY code described below
+> moved to caduceus (`caduceus.Conn`, `caduceus.Rows`, `BatchResults`,
+> `CopyFrom`); the behaviour is unchanged. gpool keeps the adapter (`session`,
+> `bindable`, `copySource`) and everything about pooling.
+
 The PostgreSQL vendor runs on `pkg/pooling` like every other vendor. What is left
 here is what is genuinely PostgreSQL-specific: dialling with `wire`, judging a connection
 without I/O, and cleaning one up. Everything below about capacity, sharding, the

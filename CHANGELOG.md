@@ -47,7 +47,20 @@ reason and the migration.
 
 ### Changed
 
-- **gpool no longer depends on pgx or pglogrepl; `go.mod` requires nothing.**
+- **The PostgreSQL driver moved to its own repository, [caduceus](https://github.com/gsoultan/caduceus).**
+  `pkg/vendors/postgres/wire` and `pkg/vendors/postgres/codec` are gone; import
+  `github.com/gsoultan/caduceus/wire` and `github.com/gsoultan/caduceus/codec`
+  instead. That touches only code that named them: `Config.BeforeConnect` now
+  takes a `*caduceus/wire.Config`, and a server error is a
+  `*caduceus/wire.Error`. The pool and CDC vendors are adapters over
+  `caduceus.Conn` and `caduceus/replication`. caduceus imports nothing outside
+  the standard library, not even `database/sql`; gpool resolves
+  `driver.Valuer` arguments such as `sql.NullString` before handing them over,
+  so they keep working, and `ErrNoRows` is still `sql.ErrNoRows`. caduceus can
+  also be used directly by an application that wants a single connection
+  without a pool, with transactions, savepoints, batches and COPY.
+
+- **gpool no longer depends on pgx or pglogrepl.**
   The PostgreSQL pool and CDC vendors run on gpool's own protocol
   implementation (`pkg/vendors/postgres/wire`) and type codec
   (`pkg/vendors/postgres/codec`), both standard library only, and CDC decodes

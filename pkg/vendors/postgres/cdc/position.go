@@ -4,9 +4,8 @@ package cdc
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
+	"github.com/gsoultan/caduceus/replication"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
 )
 
@@ -21,28 +20,8 @@ func position(lsn uint64) cdc.Position {
 	return cdc.Position(formatLSN(lsn))
 }
 
-// formatLSN writes an LSN as two hexadecimal halves, upper case, unpadded, as
-// the server does.
-func formatLSN(lsn uint64) string {
-	var buf [17]byte
-	out := appendHex(buf[:0], lsn>>32)
-	out = append(out, '/')
-	return string(appendHex(out, lsn&0xFFFFFFFF))
-}
-
-func appendHex(dst []byte, v uint64) []byte {
-	const digits = "0123456789ABCDEF"
-	if v == 0 {
-		return append(dst, '0')
-	}
-	var tmp [8]byte
-	i := len(tmp)
-	for ; v > 0; v >>= 4 {
-		i--
-		tmp[i] = digits[v&0xF]
-	}
-	return append(dst, tmp[i:]...)
-}
+// formatLSN writes an LSN as the server does, "X/Y".
+func formatLSN(lsn uint64) string { return replication.LSN(lsn).String() }
 
 // parsePosition reads a position this vendor produced back into a WAL offset.
 //
@@ -61,17 +40,6 @@ func parsePosition(p cdc.Position) (uint64, error) {
 }
 
 func parseLSN(s string) (uint64, error) {
-	high, low, ok := strings.Cut(s, "/")
-	if !ok {
-		return 0, errLSNFormat
-	}
-	hi, err := strconv.ParseUint(high, 16, 32)
-	if err != nil {
-		return 0, err
-	}
-	lo, err := strconv.ParseUint(low, 16, 32)
-	if err != nil {
-		return 0, err
-	}
-	return hi<<32 | lo, nil
+	lsn, err := replication.ParseLSN(s)
+	return uint64(lsn), err
 }

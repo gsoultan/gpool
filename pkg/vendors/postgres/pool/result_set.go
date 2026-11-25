@@ -2,7 +2,7 @@
 
 package pool
 
-import "github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
+import "github.com/gsoultan/caduceus/wire"
 
 // resultSet is what Rows and Row are built over: a cursor on a live
 // connection, or a scripted one in tests.

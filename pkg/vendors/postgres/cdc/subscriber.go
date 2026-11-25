@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
 )
 
 const (

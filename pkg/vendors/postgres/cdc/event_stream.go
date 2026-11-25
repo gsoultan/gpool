@@ -4,15 +4,15 @@ package cdc
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"iter"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gsoultan/caduceus/replication"
+	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
 )
 
 // statusTimeout bounds a single standby status update.
@@ -146,10 +146,9 @@ func (s *pgEventStream) run() {
 	stop := context.AfterFunc(s.ctx, func() { _ = netConn.SetReadDeadline(time.Unix(1, 0)) })
 	defer stop()
 
-	relations := make(map[uint32]*relation)
-	// pgoutput sends the transaction's commit LSN and commit time once, in the
-	// Begin that opens it, and every change in that transaction carries both.
-	var current transaction
+	// The decoder remembers the Relation messages that name each table's
+	// columns, and the Begin whose commit LSN and time every change carries.
+	decoder := replication.NewDecoder()
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
@@ -180,12 +179,12 @@ func (s *pgEventStream) run() {
 		}
 
 		switch data[0] {
-		case primaryKeeplive:
-			if !s.handleKeepalive(data[1:]) {
+		case replication.PrimaryKeepalive:
+			if !s.handleKeepalive(data) {
 				return
 			}
-		case xlogData:
-			if !s.handleXLogData(data[1:], relations, &current, ticker) {
+		case replication.XLogData:
+			if !s.handleXLogData(data, decoder, ticker) {
 				return
 			}
 		}
@@ -226,19 +225,17 @@ func (s *pgEventStream) receive() ([]byte, error) {
 
 // handleKeepalive processes a server keepalive. It reports whether to keep running.
 func (s *pgEventStream) handleKeepalive(data []byte) bool {
-	r := reader{data: data}
-	serverEnd := r.uint64()
-	r.uint64() // server clock
-	replyRequested := r.byte() == 1
-	if r.err != nil {
-		s.setErr(r.err)
+	keepalive, err := replication.ParseKeepalive(data)
+	if err != nil {
+		s.setErr(err)
 		return false
 	}
+	serverEnd := uint64(keepalive.ServerEnd)
 
 	advance(&s.received, serverEnd)
 	s.catchUp(serverEnd)
 
-	if replyRequested {
+	if keepalive.ReplyRequested {
 		return s.sendStatus()
 	}
 	return true
@@ -246,21 +243,16 @@ func (s *pgEventStream) handleKeepalive(data []byte) bool {
 
 // handleXLogData decodes one WAL record and, when it yields an event, delivers it.
 // It reports whether to keep running.
-func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*relation, current *transaction, ticker *time.Ticker) bool {
-	r := reader{data: data}
-	start := r.uint64()
-	r.uint64() // the server's WAL end
-	r.uint64() // server clock
-	if r.err != nil || len(r.data) == 0 {
-		s.setErr(errMalformed)
+func (s *pgEventStream) handleXLogData(data []byte, decoder *replication.Decoder, ticker *time.Ticker) bool {
+	record, err := replication.ParseXLogData(data)
+	if err != nil {
+		s.setErr(err)
 		return false
 	}
-	record := r.data
-
-	end := start + uint64(len(record))
+	end := uint64(record.End())
 	advance(&s.received, end)
 
-	pending, ok, err := decodeRecord(record, relations, current, end)
+	pending, ok, err := decodeRecord(record.Data, decoder, end)
 	if err != nil {
 		s.setErr(err)
 		return false
@@ -276,35 +268,38 @@ func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*relati
 // Relation update the decoder's state, and COMMIT, ORIGIN, TYPE, TRUNCATE and
 // friends carry no row change. Their positions are confirmed by catchUp once
 // the pipeline drains.
-func decodeRecord(record []byte, relations map[uint32]*relation, current *transaction, end uint64) (pendingEvent, bool, error) {
-	body := record[1:]
-	switch record[0] {
-	case msgBegin:
-		tx, err := parseBegin(body)
-		*current = tx
+func decodeRecord(record []byte, decoder *replication.Decoder, end uint64) (pendingEvent, bool, error) {
+	change, ok, err := decoder.Decode(record)
+	if err != nil || !ok {
 		return pendingEvent{}, false, err
-
-	case msgRelation:
-		// Relation metadata arrives once per table per session and is required to
-		// name the columns of every later row for that relation.
-		id, rel, err := parseRelation(body)
-		if err == nil {
-			relations[id] = rel
-		}
-		return pendingEvent{}, false, err
-
-	case msgInsert, msgUpdate, msgDelete:
-		if len(body) < 4 {
-			return pendingEvent{}, false, errMalformed
-		}
-		rel, ok := relations[binary.BigEndian.Uint32(body)]
-		if !ok {
-			return pendingEvent{}, false, nil
-		}
-		event, err := decodeChange(record[0], rel, body[4:], end, *current)
-		return pendingEvent{event: event, lsn: end}, err == nil, err
 	}
-	return pendingEvent{}, false, nil
+	return pendingEvent{event: toEvent(change, end), lsn: end}, true, nil
+}
+
+// toEvent is a decoded change as a cdc.Event. Position is the end of the
+// change's own record; Transaction is its transaction's commit LSN, the same
+// for every change in it.
+func toEvent(change replication.Change, end uint64) cdc.Event {
+	return cdc.Event{
+		Op:          toOp(change.Op),
+		Schema:      change.Relation.Namespace,
+		Table:       change.Relation.Name,
+		Before:      change.Before,
+		After:       change.After,
+		Position:    position(end),
+		Timestamp:   change.Transaction.Committed,
+		Transaction: position(uint64(change.Transaction.FinalLSN)),
+	}
+}
+
+func toOp(op replication.Op) cdc.Op {
+	switch op {
+	case replication.Insert:
+		return cdc.OpInsert
+	case replication.Update:
+		return cdc.OpUpdate
+	}
+	return cdc.OpDelete
 }
 
 // emit hands an event to the consumer, continuing to confirm the stream's position
@@ -390,13 +385,8 @@ func (s *pgEventStream) writeStatus(ctx context.Context) error {
 // and applied, and the client's clock.
 func appendStatus(dst []byte, written, flushed uint64, now time.Time) []byte {
 	var update [34]byte
-	update[0] = standbyStatus
-	binary.BigEndian.PutUint64(update[1:], written)
-	binary.BigEndian.PutUint64(update[9:], flushed)
-	binary.BigEndian.PutUint64(update[17:], flushed)
-	binary.BigEndian.PutUint64(update[25:], uint64(now.Sub(postgresEpoch).Microseconds()))
-	// update[33] is zero: no reply requested.
-	return wire.AppendCopyData(dst, update[:])
+	body := replication.AppendStandbyStatus(update[:0], replication.LSN(written), replication.LSN(flushed), replication.LSN(flushed), now, false)
+	return wire.AppendCopyData(dst, body)
 }
 
 // setErr records the first error to terminate the stream.

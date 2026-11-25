@@ -27,6 +27,3 @@ var (
 	// ErrInvalidConfig is returned by New when the configuration cannot be used.
 	ErrInvalidConfig = errors.New("gpool/postgres/cdc: invalid config")
 )
-
-// errLSNFormat is text that is not two hexadecimal halves separated by a slash.
-var errLSNFormat = errors.New("expected X/Y")

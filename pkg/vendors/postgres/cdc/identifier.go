@@ -6,7 +6,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/gsoultan/gpool/pkg/vendors/postgres/wire"
+	"github.com/gsoultan/caduceus/wire"
 )
 
 // SQLSTATE codes used to classify catalog errors. Matching on codes rather than on

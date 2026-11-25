@@ -48,8 +48,9 @@ These outrank convenience. Every profile enforces them.
   `BenchmarkGpoolAcquireRelease` is 1 alloc / ~320ns; a query is ~50µs.
 
 **Checklist:** `gofmt` clean · `go vet` clean · exported symbols documented · no new
-dependency without justification (the core module has none; pgx and pglogrepl
-appear only in `benchmarks/`, as what gpool is measured against).
+dependency without justification (the core module requires only caduceus, the
+author's own pure-Go PostgreSQL driver, which itself requires nothing; pgx and
+pglogrepl appear only in `benchmarks/`, as what gpool is measured against).
 
 ---
 
@@ -75,6 +76,13 @@ appear only in `benchmarks/`, as what gpool is measured against).
   `pkg/pooling` is the engine, `pkg/sqldriver` is stdlib-only and serves every
   `database/sql` driver. A new `database/sql` vendor should be about a hundred
   lines — if it is more, something belongs in `pkg/sqldriver` instead.
+- **The PostgreSQL protocol lives in caduceus** (`github.com/gsoultan/caduceus`):
+  `wire`, `codec`, `replication`, and the `Conn` that runs queries. gpool's
+  PostgreSQL vendors are adapters over it and hold only what pooling needs:
+  liveness, reset, the `gpool` interfaces. A protocol or decoding fix goes to
+  caduceus, then gpool bumps the version. caduceus must stay free of
+  `database/sql`, pgx and pglogrepl, which are its competitors; gpool bridges
+  `driver.Valuer` arguments itself (`bindable`).
 - Several databases means several pools, registered by name on the `Engine`, sharing
   nothing. Never multiplex databases through one pool: separate capacity is what
   keeps one saturated backend from starving the rest.
