@@ -47,6 +47,20 @@ reason and the migration.
 
 ### Changed
 
+- **`CopyFrom` on PostgreSQL picks COPY's format from the column types.**
+  When every column is a type the driver encodes in binary (the integers,
+  floats, bool, text, varchar, char, bytea, uuid, date, timestamp, timestamptz,
+  interval, json, jsonb) the rows are sent in COPY's binary format, which the
+  server reads without parsing. A table with any other column, a `numeric` or
+  an enum, is copied in text, where pgx needed a binary codec registered for
+  it. A value only the server can read, such as a string for an integer
+  column, is accepted too: from that row on the rows go in a text COPY that
+  commits or fails with the first, so the copy is still all or nothing. A
+  `CopyFrom` outside a transaction runs in one of its own. On a
+  million two-column rows the wall time matches pgx's, since it is the
+  server's, for less than half the client CPU. A `float64` too large for a
+  `real` is refused with an overflow error rather than stored as `Infinity`.
+
 - **The PostgreSQL driver moved to its own repository, [caduceus](https://github.com/gsoultan/caduceus).**
   `pkg/vendors/postgres/wire` and `pkg/vendors/postgres/codec` are gone; import
   `github.com/gsoultan/caduceus/wire` and `github.com/gsoultan/caduceus/codec`

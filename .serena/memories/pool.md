@@ -159,10 +159,22 @@ expiry needs tens of milliseconds and the reaper on.
 `BulkCopier` (Pool + Conn), `Batcher` (Conn), `Notifier` (Conn), `Resizable`
 (Pool), `Lifecycle` (Stat). Separate interfaces reached by type assertion, so
 `Pool`/`Conn`/`Stat` stay within the ISP method limit.
-`CopyFrom` learns the column types and starts the COPY in one round trip (Parse +
-Describe of a SELECT over the columns, Sync, then the COPY query behind it), then
-streams text format via `codec.EncodeText` in 64 KiB CopyData chunks. A source error
-sends CopyFail. `SendBatch` pipelines behind one Sync (one implicit transaction, as
+`CopyFrom` is caduceus's and takes two round trips whatever the row count. The
+first learns the column types: Parse + Describe of a SELECT over the columns. The
+second carries the COPY command as a simple Query (what libpq sends, and what
+PgBouncer tracks correctly; a COPY through the extended protocol made PgBouncer
+1.22.0 drop the server connection), the rows in 64 KiB CopyData chunks, and
+CopyDone. Outside a transaction caduceus wraps the two in a BEGIN ... COMMIT of
+its own, pipelined with them, so the table lock is held from the describe to the
+COPY and the types described are the types written to; inside the caller's
+transaction it adds nothing. Rows go in COPY's binary format when every column
+type has a binary encoding (`codec.BinaryInput`), in text otherwise. A value with
+no binary form (a string for an int column) is not refused: the rest of the stream
+goes as a second, text COPY in the same transaction, so the copy is still all or
+nothing. Never cache the described types across calls: a stale type in binary is
+silent corruption, not an error. A source error sends CopyFail, and ROLLBACK for
+a transaction caduceus began.
+`SendBatch` pipelines behind one Sync (one implicit transaction, as
 with pgx): one round trip when every statement is cached, two when some must be
 described first.
 

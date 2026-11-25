@@ -875,6 +875,12 @@ copied, err := copier.CopyFrom(ctx, gpool.CopyRequest{
 
 `CopyRows` is a cursor, not a slice, so you can stream a dataset larger than memory.
 
+On PostgreSQL the rows are sent in COPY's binary format, which the server reads without parsing,
+when every column is an integer, float, bool, text, bytea, uuid, date, timestamp, interval or JSON
+type, and in text when any column is something else. A value only the server can read, such as the
+string `"42"` for an integer column, is still accepted: from that row on the rows go in text, and
+the copy stays all or nothing.
+
 **`Batcher`** — pipeline statements so N of them cost roughly one round trip instead of N. Available
 on `Conn` only: the result reader stays valid just while the connection is held.
 
