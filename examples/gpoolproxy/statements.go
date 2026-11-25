@@ -69,8 +69,15 @@ func newStatements(limit int) *statements {
 // next Parse, every client overwrites it constantly, and replaying a stale one
 // would bind arguments to the wrong SQL.
 func (s *statements) remember(name string, message []byte) (evicted string, didEvict bool) {
+	evicted, _, didEvict = s.displace(name, message)
+	return evicted, didEvict
+}
+
+// displace is remember, and also returns the Parse of whatever was discarded,
+// so that a discard the server turns out not to have made can be undone.
+func (s *statements) displace(name string, message []byte) (evicted string, evictedMessage []byte, didEvict bool) {
 	if name == "" {
-		return "", false
+		return "", nil, false
 	}
 	s.uses++
 
@@ -79,11 +86,11 @@ func (s *statements) remember(name string, message []byte) (evicted string, didE
 	if held, ok := s.byName[name]; ok {
 		held.message = bytes.Clone(message)
 		held.used = s.uses
-		return "", false
+		return "", nil, false
 	}
 
 	if s.limit > 0 && len(s.byName) >= s.limit {
-		evicted, didEvict = s.evict()
+		evicted, evictedMessage, didEvict = s.evict()
 	}
 	// Allocated on first use: most sessions never name a statement, and the map
 	// would otherwise be the largest thing an idle client holds.
@@ -91,7 +98,7 @@ func (s *statements) remember(name string, message []byte) (evicted string, didE
 		s.byName = make(map[string]*statement)
 	}
 	s.byName[name] = &statement{message: bytes.Clone(message), used: s.uses}
-	return evicted, didEvict
+	return evicted, evictedMessage, didEvict
 }
 
 // evict discards the least recently used statement and names it.
@@ -101,7 +108,7 @@ func (s *statements) remember(name string, message []byte) (evicted string, didE
 // nothing beside the round trip the Parse that triggered it is about to make. The
 // cost an adversarial client can impose is therefore a constant per message, not
 // a growing one.
-func (s *statements) evict() (string, bool) {
+func (s *statements) evict() (string, []byte, bool) {
 	var oldest string
 	var oldestUse uint64
 	first := true
@@ -112,14 +119,35 @@ func (s *statements) evict() (string, bool) {
 		}
 	}
 	if first {
-		return "", false
+		return "", nil, false
 	}
+	message := s.byName[oldest].message
 	delete(s.byName, oldest)
-	return oldest, true
+	return oldest, message, true
 }
 
 func (s *statements) forget(name string) {
 	delete(s.byName, name)
+}
+
+// peek returns a remembered Parse without counting it as a use.
+func (s *statements) peek(name string) ([]byte, bool) {
+	held, ok := s.byName[name]
+	if !ok {
+		return nil, false
+	}
+	return held.message, true
+}
+
+// restore puts back a Parse that a change the server skipped had taken out or
+// replaced. It takes the message as it is, already a copy of its own, and it
+// may leave the set one over its limit until the next statement is remembered.
+func (s *statements) restore(name string, message []byte) {
+	if s.byName == nil {
+		s.byName = make(map[string]*statement)
+	}
+	s.uses++
+	s.byName[name] = &statement{message: message, used: s.uses}
 }
 
 // lookup returns a remembered Parse and marks it as the most recently used, which

@@ -47,6 +47,63 @@ reason and the migration.
 
 ### Changed
 
+- **`Begin` on PostgreSQL no longer makes a round trip.** `BEGIN` travels with
+  the transaction's first statement, in the same write, so `Begin`, one
+  statement and `Commit` take one round trip fewer, two where they took three
+  once the statement is known to the connection, and a
+  transaction that runs no statement sends nothing. The first statement can be
+  a batch or a `CopyFrom` as well. The statement and its `BEGIN` share one
+  Sync, or one query string, and nothing else is sent until the server has
+  answered for both, so a statement run through a `Tx` never runs without the
+  `BEGIN` in front of it having taken effect. PostgreSQL takes its snapshot at
+  the first statement either way. Three things differ:
+  - A dead connection is found by the first statement rather than by `Begin`.
+  - `transaction_timestamp()` and `now()` are when that statement arrived.
+  - A `BEGIN` the server refuses is reported by the first statement, which
+    does not run. Until that transaction is settled, the `Tx` and the
+    connection return the new `ErrTxNotBegun` for everything, so nothing runs
+    outside the transaction the caller believes is open. `Begin` sends a plain
+    `BEGIN`, which a server has little reason to refuse.
+
+  A first statement the server cannot parse leaves the transaction open and
+  failed, as it always has. Sent without arguments it shares one string with
+  `BEGIN`, which the server refuses whole, so the driver sends that string
+  again as its two parts: three round trips, on that error only.
+
+  A connection released with a transaction begun and never used is unwound
+  before anyone else gets it, as an open one is, and that now costs nothing.
+
+- **With the statement cache off, a statement keeps nothing on the server and
+  takes one round trip.** `StatementCacheCapacity: DisableCache`, and a
+  `ResetQuery`, run every statement on the unnamed statement. It is now parsed
+  in the same Sync that binds and runs it, so nothing on the server outlives a
+  Sync, and a pooler in transaction mode can give each Sync whichever backend
+  it likes. The connection remembers what the server said of a statement's
+  parameters and columns, so a statement it has run before goes in one round
+  trip where it took two, one of them to ask. `DescriptionCacheCapacity` bounds
+  how many it remembers, 64 by default; `DisableCache` there asks every time.
+  A statement is parsed with the parameter types it was described with, as a
+  prepared statement keeps its own. Its columns are compared with the
+  server's on every execution, and a result whose columns changed is read as
+  the server describes it. An error that says the description no longer fits
+  forgets it, and a `ResetQuery` clears it with the rest of the session.
+
+  Until this, on the new driver, such a statement was described in one Sync
+  and bound in the next. Behind PgBouncer in transaction mode the two could
+  reach different backends, and the Bind ran whatever another client had
+  parsed last there: of 4,800 statements from 12 clients, each running its
+  own, 4,393 came back with another client's answer. The pgx driver of 1.1.0
+  and before did not do this. `integration/pgbouncer_test.go` now gives every
+  worker statements of its own and checks the answers.
+
+- **A large result wakes the reader less often.** Once a result has run past
+  4 MiB, on Linux over TCP, the socket's receive low-water mark is raised to
+  64 KiB, so the reader is woken an eighth as often and the server no longer
+  has to wake it with every buffer it sends. The mark is lowered 2 ms after
+  the stream pauses, so the end of such a result, or a pause in it, arrives
+  about 2 ms late, later on a machine too busy to run that timer on time. `wire.Config.NoStreamWatermark`, set in `BeforeConnect`,
+  turns it off.
+
 - **`CopyFrom` on PostgreSQL picks COPY's format from the column types.**
   When every column is a type the driver encodes in binary (the integers,
   floats, bool, text, varchar, char, bytea, uuid, date, timestamp, timestamptz,
@@ -95,8 +152,9 @@ reason and the migration.
   - A server error is `*wire.Error` instead of `*pgconn.PgError`. Classify by
     `Code` or by the `SQLState()` method, which both have.
   - `ErrNoRows` is `sql.ErrNoRows`, which `pgx.ErrNoRows` also wrapped.
-  - `DescriptionCacheCapacity` has no effect and is kept so configurations
-    still compile.
+  - `DescriptionCacheCapacity` is used only when no statements are kept on
+    the server, and bounds what a connection remembers of them instead; see
+    above. With the statement cache on it has no effect.
   - Types the codec does not know are scanned from their text form; there is
     no type registration. `Exec` of `COPY ... TO STDOUT` is refused.
 
@@ -156,7 +214,41 @@ reason and the migration.
   Linux is tested. The kqueue poller compiles but has not been run, and the
   example no longer builds on Windows.
 
+- **`ErrInTransaction` and `ErrResultChanged` on PostgreSQL.** `Begin` on a
+  connection a statement has already begun a transaction on returns
+  `ErrInTransaction`, where PostgreSQL would only warn and the `Tx`'s
+  `Rollback` would undo what ran before it. On a connection that keeps no
+  statements on the server, a column that changed type since its statement was
+  described, to one that cannot be read in the format its old type was asked
+  for in, is refused with `ErrResultChanged`, which says the statement ran. A
+  numeric, the commonest such change, is read instead. Both were caduceus's
+  own errors before, which a caller of this package had no name for.
+
 ### Fixed
+
+- **`examples/gpoolproxy` recorded a Parse or Close as done before the server
+  ran it.** After an error the server skips every message up to the Sync, the
+  proxy's injected Close and Parse among them. The proxy believed a backend held
+  one client's statement when it held another client's of the same name, which
+  then ran in its place, with no error; it swallowed a reply that was the
+  client's own, for the injected one that never came; and a skipped Close left
+  the next client preparing the name refused with 42P05. Each is now undone
+  when its Sync's ReadyForQuery arrives unanswered.
+
+- **A `Tx` kept past `Release` can no longer reach the connection.** A `Tx`
+  whose connection had been released stayed live: its `Exec` ran inside
+  whatever transaction the connection's next caller had open, and its `Commit`
+  committed that transaction for them. A `Tx` now ends with the acquisition it
+  began on, whatever state its transaction was left in, one ended in SQL with
+  a `COMMIT` run as a statement included. It returns `ErrTxClosed` from then
+  on and sends nothing.
+
+  The `database/sql` vendors (MySQL, SQL Server, ClickHouse) already refused
+  the statements of such a `Tx`, but its `Commit` and `Rollback` still went to
+  the driver, and for a driver whose transaction is the connection itself that
+  settles whatever the next caller has open. They also cleared the pool's note
+  of the next caller's transaction, so one left unsettled was no longer rolled
+  back on release. Both now return `ErrTxClosed` and touch nothing.
 
 - **`CreateSlot` and `DropSlot` validate the slot name they are given.** The
   name reaches the replication command unquoted, and only `Config.SlotName`

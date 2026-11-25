@@ -25,11 +25,16 @@ type session struct {
 }
 
 // newSession runs queries on conn, keeping up to statements prepared on the
-// server, or none.
-func newSession(conn *wire.Conn, statements int) *session {
-	options := caduceus.Options{StatementCacheCapacity: statements}
+// server, or none. With none kept there it remembers what the server said of
+// up to descriptions statements, or of none. caduceus reads zero as its
+// default, so none is passed as a negative.
+func newSession(conn *wire.Conn, statements, descriptions int) *session {
+	options := caduceus.Options{StatementCacheCapacity: statements, DescriptionCacheCapacity: descriptions}
 	if statements <= 0 {
 		options.StatementCacheCapacity = -1
+	}
+	if descriptions <= 0 {
+		options.DescriptionCacheCapacity = -1
 	}
 	return &session{db: caduceus.New(conn, options), conn: conn}
 }

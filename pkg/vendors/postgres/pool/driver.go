@@ -45,7 +45,7 @@ func (d *wireDriver) Connect(ctx context.Context) (*pgConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gpool/postgres: connect: %w", err)
 	}
-	c := &pgConn{session: newSession(conn, d.settings.statements)}
+	c := &pgConn{session: newSession(conn, d.settings.statements, d.settings.descriptions)}
 	if d.config.AfterConnect != nil {
 		if err := d.config.AfterConnect(ctx, detachedConn{c: c}); err != nil {
 			closeConn(conn)
@@ -116,14 +116,23 @@ func (d *wireDriver) Recyclable(ctx context.Context, c *pgConn) bool {
 // A connection returned in either state carries the previous caller's work into
 // the next one: an open transaction holds its locks and eventually its snapshot,
 // and a failed one rejects every statement until it is unwound.
+//
+// The status is caduceus's, not the wire's: a transaction begun and not yet
+// sent to the server is open there and idle on the wire, and returned as idle
+// its BEGIN would go out in front of the next caller's first statement.
 func (c *pgConn) inTransaction() bool {
-	return c.session.conn.TxStatus() != wire.TxIdle
+	return c.session.db.TxStatus() != wire.TxIdle
 }
 
 // rollback unwinds a transaction left open by the previous caller, reporting
 // whether the connection came back to a clean idle state.
+//
+// caduceus does the unwinding, because it knows two things the wire does not:
+// a transaction whose BEGIN was never sent has nothing to roll back, so that
+// one costs no round trip; and the caller may still hold the Tx, which is spent
+// here so it cannot reach whoever is handed the connection next.
 func (c *pgConn) rollback(ctx context.Context) bool {
-	if _, err := c.session.exec(ctx, "ROLLBACK", nil); err != nil {
+	if err := c.session.db.Unwind(ctx); err != nil {
 		return false
 	}
 	return !c.inTransaction()

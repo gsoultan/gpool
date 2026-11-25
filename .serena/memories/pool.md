@@ -102,6 +102,25 @@ round trip, and makes `Stat` lock-free.
   to commit hands the next caller their locks and snapshot, or a poisoned session
   rejecting everything with `25P02`. Rolling back is one round trip; pgxpool
   destroys the connection instead, which costs a full reconnect.
+- **`Begin` sends nothing; caduceus holds the BEGIN and sends it with the first
+  statement.** So the gate reads caduceus's `TxStatus()`, never the wire's: a
+  transaction begun and not yet sent is idle on the wire, and returned as idle its
+  BEGIN would go out in front of the next caller's statement. A BEGIN the server
+  refused reads as `'E'` there, and caduceus runs nothing on that connection,
+  through the Tx or around it, until the transaction is settled or unwound
+  (`ErrTxNotBegun`). A plain BEGIN is rarely refused; a first statement the server
+  cannot parse is not a refusal, caduceus re-sends the two apart and the
+  transaction is open and failed.
+- **The gate unwinds through `caduceus.Conn.Unwind`, not by sending `ROLLBACK`
+  itself.** Unwind rolls back, costs nothing when the BEGIN never went, and spends
+  every `caduceus.Tx` begun on the connection. `sessionTx` maps caduceus's
+  sentinels onto this package's (`inOurWords`).
+- **A `pgTx` ends with the acquisition it began on (`lease`).** The gate runs only
+  when there is something to unwind, so a transaction the caller ended in SQL
+  leaves its `caduceus.Tx` live through the release. `pgTx` therefore asks its
+  `pooling.Handle` whether the connection has been released before every use, and
+  `pkg/sqldriver` asks `connWrapper.live()`. Anything else a caller can keep that
+  reaches a connection needs the same check.
 - `totalConns` moves only in `connect` (+1) and `destroy` (-1).
 
 ## Statistics
@@ -182,8 +201,15 @@ described first.
 
 `Config.StatementCacheCapacity` bounds the session's LRU of named statements
 (`gpool_<base36>`), nothing preallocated. Default 64. An eviction queues a Close sent
-ahead of the next Parse, so it costs no round trip. `DescriptionCacheCapacity` is
-inert, kept for source compatibility. Under pgx the two caches were 57% of the heap
+ahead of the next Parse, so it costs no round trip. With the statement cache off
+(`DisableCache`, or a `ResetQuery`) nothing is kept on the server: caduceus parses
+a statement into the unnamed statement in the same Sync that binds it, because a
+pooler in transaction mode may give two Syncs different backends, and a Bind of
+an unnamed statement parsed in an earlier Sync ran another client's statement
+(measured: 4,393 of 4,800 answers wrong through PgBouncer). `DescriptionCacheCapacity`
+bounds what the connection remembers of such statements instead, which makes a
+known one a single round trip; the columns are compared with the server's on
+every execution and a reset clears it. Under pgx the two caches were 57% of the heap
 (`mem:scale`); a pooled connection is now ~11 KiB against pgxpool's ~82. `cacheCapacity` resolves the default itself so
 `parse()` gives the same answer whether or not `withDefaults()` ran first.
 

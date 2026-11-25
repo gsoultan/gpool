@@ -178,6 +178,19 @@ if _, err := tx.Exec(ctx, "UPDATE users SET active = $1 WHERE id = $2", false, i
 return tx.Commit(ctx)
 ```
 
+On PostgreSQL `Begin` sends nothing: `BEGIN` travels with the transaction's first statement, in the
+same write, so the example above takes one round trip fewer: two, not three, once its statement is
+known to the connection, which a statement the connection has not seen yet asks about first. The
+BEGIN and the statement are answered together, so a
+statement run through the `Tx` never runs without its `BEGIN` having taken effect. A dead
+connection is found by the first statement rather than by `Begin`, and so is a `BEGIN` the server
+refuses: that statement returns the server's error without having run, and until the transaction
+is settled the `Tx` and its connection return `ErrTxNotBegun`.
+
+A `Tx` belongs to the connection it began on only until that connection is released. From then on
+it returns `ErrTxClosed` and sends nothing, whatever state its transaction was left in. One left
+unsettled is rolled back by the pool before anyone else gets the connection.
+
 ### Lifecycle guarantees
 
 Every teardown method is idempotent, because the idiomatic Go patterns call them more than once:
@@ -211,8 +224,8 @@ advances. Scan what you need inside the loop body.
 | `ResetQuery` | `""` | See below |
 | `ResetQueryTimeout` | `5s` | |
 | `ConnectTimeout` | `10s` | Used when the caller's context has no earlier deadline |
-| `StatementCacheCapacity` | `64` | Per-connection prepared-statement cache; `DisableCache` turns it off |
-| `DescriptionCacheCapacity` | — | No effect: a prepared statement carries its own description. Kept so existing configs compile |
+| `StatementCacheCapacity` | `64` | Per-connection prepared-statement cache; `DisableCache` turns it off, and a statement is then parsed in the round trip that runs it |
+| `DescriptionCacheCapacity` | `64` | Used only when no statements are kept on the server (`DisableCache` above, or a `ResetQuery`): how many statements a connection remembers the parameter and column types of, so that one it has run before takes one round trip. `DisableCache` asks the server every time |
 | `BeforeConnect` | `nil` | `func(*wire.Config) error` (`github.com/gsoultan/caduceus/wire`): adjust the config per connection, e.g. credential rotation |
 | `AfterConnect` | `nil` | `func(ctx, gpool.Conn) error`: run `SET` and the like; an error discards the connection |
 
@@ -288,7 +301,9 @@ connection is destroyed rather than reused.
 `DISCARD ALL` deallocates the server's prepared statements, so with a reset query gpool keeps no
 statement cache: every query is parsed into the unnamed statement — parameters still bound
 server-side, but nothing cached by name. Otherwise the cache would go stale and the next query
-would fail with `SQLSTATE 26000`. It also
+would fail with `SQLSTATE 26000`. The connection still remembers what the server said of each
+statement for as long as one caller holds it, so only a statement's first use after an acquire
+takes a second round trip, to ask; the reset drops that with the rest of the session. It also
 costs a full extra round trip on every release, roughly doubling per-query latency.
 
 Set `ResetQuery` only when callers hold connections long enough to accumulate session state
@@ -652,6 +667,20 @@ pool, err := gpool.NewPool(gpool.Postgres, postgrespool.Config{
 })
 ```
 
+What makes it safe is that nothing on the server is carried from one Sync to the
+next. Transaction mode hands a backend out per transaction, and outside a
+transaction that is per Sync, so a statement described in one Sync and bound in
+the next may be bound on a backend where another client parsed something else
+last. With the cache off, gpool parses a statement in the very Sync that binds and
+runs it. It remembers what the server said of the statement's parameters and
+columns (`DescriptionCacheCapacity`, 64 statements a connection by default), so a
+statement it has run before is one round trip, and it holds that to the server's
+word: the columns are compared with the server's every time the statement runs,
+and an error that says the description no longer fits forgets it.
+
+What it costs against the default is the server's work: an unnamed statement is
+parsed and planned every time it runs, where a prepared one is parsed once.
+
 Three further things to know:
 
 - **Leave `ResetQuery` empty.** PgBouncer already runs `server_reset_query` itself;
@@ -1004,8 +1033,11 @@ All sentinels are comparable with `errors.Is`.
 
 `pkg/gpool`: `ErrVendorNotRegistered`, `ErrNilFactory`, `ErrEmptyVendor`.
 
-`pkg/vendors/postgres/pool`: `ErrPoolClosed`, `ErrConnReleased`, `ErrTxClosed`, `ErrRowsClosed`,
-`ErrInvalidConfig`.
+`pkg/vendors/postgres/pool`: `ErrPoolClosed`, `ErrConnReleased`, `ErrTxClosed`, `ErrTxNotBegun`,
+`ErrTxCommitRollback`, `ErrRowsClosed`, `ErrInvalidConfig`, `ErrInTransaction` (`Begin` on a
+connection a statement has already begun a transaction on), `ErrResultChanged` (a column that
+changed type since its statement was described, on a connection that keeps no statements on the
+server; the statement ran).
 
 `pkg/vendors/postgres/cdc`: `ErrClosed`, `ErrAlreadySubscribed`, `ErrNoTables`, `ErrInvalidConfig`.
 

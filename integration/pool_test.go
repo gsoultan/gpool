@@ -263,6 +263,36 @@ func TestTransactionCommitWithDeferredRollback(t *testing.T) {
 	}
 }
 
+// A transaction begun with a statement and then with Begin is one
+// transaction, which the server would only warn about: the Tx's Rollback
+// would then undo what ran before Begin. Begin refuses, with an error that
+// can be told apart, where it used to come back as caduceus's own sentinel,
+// which a caller of this package had no name for.
+func TestBeginOnAConnectionAlreadyInATransaction(t *testing.T) {
+	pool := newPool(t, postgrespool.Config{MaxConns: 1})
+	conn, err := pool.Acquire(t.Context())
+	if err != nil {
+		t.Fatalf("Acquire() = %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(t.Context(), "BEGIN"); err != nil {
+		t.Fatalf("BEGIN = %v", err)
+	}
+	if _, err := conn.Begin(t.Context()); !errors.Is(err, postgrespool.ErrInTransaction) {
+		t.Fatalf("Begin() in a transaction = %v, want ErrInTransaction", err)
+	}
+	if _, err := conn.Exec(t.Context(), "ROLLBACK"); err != nil {
+		t.Fatalf("ROLLBACK = %v", err)
+	}
+	tx, err := conn.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("Begin() after the rollback = %v", err)
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatalf("Rollback() = %v", err)
+	}
+}
+
 // The transaction-mode contract: a caller that returns a connection without
 // settling its transaction must not leak it onward. Without this gate the next
 // caller inherits the open transaction, its locks, and its snapshot.
@@ -352,6 +382,330 @@ func TestPoolReusesConnectionAfterUnwinding(t *testing.T) {
 	// One connection, established once and unwound five times.
 	if got := pool.Stat().TotalConnections(); got != 1 {
 		t.Fatalf("TotalConnections() = %d, want 1 - the connection was replaced rather than unwound", got)
+	}
+}
+
+// Begin sends nothing: BEGIN goes with the transaction's first statement. So a
+// transaction begun and released unused is idle as far as the server knows, and
+// a gate that asked only the wire would hand the connection on with that BEGIN
+// still waiting. It would then go out in front of the next caller's first
+// statement, which would run inside a transaction nobody is going to end.
+func TestPoolUnwindsTransactionNeverSentOnRelease(t *testing.T) {
+	pool := newPool(t, postgrespool.Config{MaxConns: 1})
+	ctx := t.Context()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire() = %v", err)
+	}
+	if _, err := conn.Begin(ctx); err != nil {
+		t.Fatalf("Begin() = %v", err)
+	}
+	conn.Release()
+
+	next, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire() after a transaction begun and never used = %v", err)
+	}
+	defer next.Release()
+
+	// VACUUM is rejected inside a transaction block, so it says whether a BEGIN
+	// came with it.
+	if _, err := next.Exec(ctx, "VACUUM"); err != nil {
+		t.Fatalf("the next caller's statement carried the previous caller's BEGIN: %v", err)
+	}
+}
+
+// nextTx is the transaction of a connection's next caller, however they began
+// it.
+type nextTx struct {
+	exec     func(sql string) error
+	rollback func() error
+}
+
+// beginThroughThePool is the transaction a caller would write.
+func beginThroughThePool(ctx context.Context, conn gpool.Conn) (nextTx, error) {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nextTx{}, err
+	}
+	return nextTx{
+		exec: func(sql string) error {
+			_, err := tx.Exec(ctx, sql)
+			return err
+		},
+		rollback: func() error { return tx.Rollback(ctx) },
+	}, nil
+}
+
+// beginInSQL is a transaction the pool's own bookkeeping knows nothing of, so
+// nothing on the next caller's side can have ended a Tx kept by the caller
+// before them.
+func beginInSQL(ctx context.Context, conn gpool.Conn) (nextTx, error) {
+	exec := func(sql string) error {
+		_, err := conn.Exec(ctx, sql)
+		return err
+	}
+	return nextTx{exec: exec, rollback: func() error { return exec("ROLLBACK") }}, exec("BEGIN")
+}
+
+// A caller that releases a connection may still be holding the Tx it began
+// there. That Tx used to stay live: its Exec ran inside whatever transaction
+// the connection's next caller had open, and its Commit committed that
+// transaction for them. Unwinding the connection on release then ended it, but
+// only where there was a transaction to unwind: one the caller had ended in
+// SQL, with a COMMIT run as a statement, stayed live through the release. A Tx
+// now ends with the acquisition it began on, whatever state it was left in.
+func TestTxIsSpentOnceItsConnectionIsReleased(t *testing.T) {
+	pool := newPool(t, postgrespool.Config{MaxConns: 1})
+	ctx := t.Context()
+	table := scratchTable(t, pool, "(id int PRIMARY KEY)")
+
+	lefts := []struct {
+		name  string
+		leave func(conn gpool.Conn, tx gpool.Tx)
+	}{
+		{"begun and never used", func(gpool.Conn, gpool.Tx) {}},
+		{"open", func(_ gpool.Conn, tx gpool.Tx) { _, _ = tx.Exec(ctx, "SELECT 1") }},
+		{"failed", func(_ gpool.Conn, tx gpool.Tx) {
+			_, _ = tx.Exec(ctx, "SELECT * FROM a_table_that_does_not_exist")
+		}},
+		{"committed in SQL through the Tx", func(_ gpool.Conn, tx gpool.Tx) {
+			_, _ = tx.Exec(ctx, "SELECT 1")
+			_, _ = tx.Exec(ctx, "COMMIT")
+		}},
+		{"committed in SQL on the connection", func(conn gpool.Conn, tx gpool.Tx) {
+			_, _ = tx.Exec(ctx, "SELECT 1")
+			_, _ = conn.Exec(ctx, "COMMIT")
+		}},
+		{"rolled back in SQL", func(_ gpool.Conn, tx gpool.Tx) {
+			_, _ = tx.Exec(ctx, "SELECT 1")
+			_, _ = tx.Exec(ctx, "ROLLBACK")
+		}},
+	}
+	begins := []struct {
+		name string
+		open func(context.Context, gpool.Conn) (nextTx, error)
+	}{
+		{"through the pool", beginThroughThePool},
+		{"in SQL", beginInSQL},
+	}
+	settles := []struct {
+		name string
+		run  func(tx gpool.Tx) error
+	}{
+		{"Commit", func(tx gpool.Tx) error { return tx.Commit(ctx) }},
+		{"Rollback", func(tx gpool.Tx) error { return tx.Rollback(ctx) }},
+	}
+
+	for _, left := range lefts {
+		for _, begin := range begins {
+			for _, settle := range settles {
+				name := left.name + ", the next transaction begun " + begin.name + ", then " + settle.name
+				t.Run(name, func(t *testing.T) {
+					if _, err := pool.Exec(ctx, "TRUNCATE "+table); err != nil {
+						t.Fatalf("TRUNCATE = %v", err)
+					}
+
+					conn, err := pool.Acquire(ctx)
+					if err != nil {
+						t.Fatalf("Acquire() = %v", err)
+					}
+					defer conn.Release()
+					kept, err := conn.Begin(ctx)
+					if err != nil {
+						t.Fatalf("Begin() = %v", err)
+					}
+					left.leave(conn, kept)
+					conn.Release()
+
+					// MaxConns is 1, so the next caller has the same connection.
+					next, err := pool.Acquire(ctx)
+					if err != nil {
+						t.Fatalf("Acquire() = %v", err)
+					}
+					defer next.Release()
+					theirs, err := begin.open(ctx, next)
+					if err != nil {
+						t.Fatalf("the next caller's BEGIN = %v", err)
+					}
+					if err := theirs.exec("INSERT INTO " + table + " VALUES (1)"); err != nil {
+						t.Fatalf("the next caller's first statement = %v", err)
+					}
+
+					if _, err := kept.Exec(ctx, "INSERT INTO "+table+" VALUES (2)"); !errors.Is(err, postgrespool.ErrTxClosed) {
+						t.Errorf("Exec() on the Tx kept past Release = %v, want ErrTxClosed", err)
+					}
+					if err := settle.run(kept); !errors.Is(err, postgrespool.ErrTxClosed) {
+						t.Errorf("%s() on the Tx kept past Release = %v, want ErrTxClosed", settle.name, err)
+					}
+
+					// A statement of theirs after it: had the kept Tx ended their
+					// transaction either way, this one would commit by itself.
+					if err := theirs.exec("INSERT INTO " + table + " VALUES (3)"); err != nil {
+						t.Fatalf("the next caller's second statement = %v", err)
+					}
+					if err := theirs.rollback(); err != nil {
+						t.Fatalf("the next caller's rollback = %v", err)
+					}
+					var rows int
+					if err := next.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&rows); err != nil {
+						t.Fatalf("count = %v", err)
+					}
+					if rows != 0 {
+						t.Fatalf("%d rows survived the next caller's rollback: the kept Tx reached their transaction", rows)
+					}
+				})
+			}
+		}
+	}
+}
+
+// What the saved round trip looks like from the server: a transaction begun is
+// not one it knows of until the first statement arrives, and one that runs no
+// statement it never hears of at all.
+func TestBeginIsSentWithTheFirstStatement(t *testing.T) {
+	pool := newPool(t, postgrespool.Config{MaxConns: 2})
+	ctx := t.Context()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire() = %v", err)
+	}
+	defer conn.Release()
+	var pid int32
+	if err := conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+		t.Fatalf("pg_backend_pid() = %v", err)
+	}
+	// Asked through the pool's other connection.
+	state := func() string {
+		t.Helper()
+		var state string
+		if err := pool.QueryRow(ctx, "SELECT state FROM pg_stat_activity WHERE pid = $1::int4", pid).Scan(&state); err != nil {
+			t.Fatalf("pg_stat_activity = %v", err)
+		}
+		return state
+	}
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin() = %v", err)
+	}
+	if got := state(); got != "idle" {
+		t.Fatalf("server state after Begin() = %q, want idle: BEGIN was sent on its own", got)
+	}
+	if _, err := tx.Exec(ctx, "SELECT $1::int4", 1); err != nil {
+		t.Fatalf("Exec() = %v", err)
+	}
+	if got := state(); got != "idle in transaction" {
+		t.Fatalf("server state after the first statement = %q, want idle in transaction", got)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit() = %v", err)
+	}
+	if got := state(); got != "idle" {
+		t.Fatalf("server state after Commit() = %q, want idle", got)
+	}
+
+	empty, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin() = %v", err)
+	}
+	if err := empty.Commit(ctx); err != nil {
+		t.Fatalf("Commit() of a transaction that ran nothing = %v", err)
+	}
+	if _, err := conn.Exec(ctx, "VACUUM"); err != nil {
+		t.Fatalf("a statement after an empty transaction found a BEGIN in front of it: %v", err)
+	}
+}
+
+// sqlState is the SQLSTATE a server error carries, empty for any other error.
+func sqlState(err error) string {
+	var coded interface{ SQLState() string }
+	if !errors.As(err, &coded) {
+		return ""
+	}
+	return coded.SQLState()
+}
+
+// A first statement sent without arguments shares one string with its BEGIN,
+// and the server parses a string whole before running any of it, so one it
+// cannot parse takes the BEGIN down with it. For a while that left the caller
+// holding a transaction the server had never opened, and whatever they then
+// ran on the connection itself ran on its own and stayed committed. The string
+// is now sent again as its two parts, which leaves what an unparseable
+// statement has always left behind: a transaction open and failed, in which
+// the server runs nothing until it is rolled back.
+func TestTransactionWhoseFirstStatementCannotBeParsed(t *testing.T) {
+	pool := newPool(t, postgrespool.Config{MaxConns: 1})
+	ctx := t.Context()
+	table := scratchTable(t, pool, "(id int PRIMARY KEY)")
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire() = %v", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin() = %v", err)
+	}
+	if _, err := tx.Exec(ctx, "SELEC 1"); sqlState(err) != "42601" {
+		t.Fatalf("Exec() of a statement the server cannot parse = %v, want SQLSTATE 42601", err)
+	}
+
+	for _, attempt := range []struct {
+		name string
+		run  func() error
+	}{
+		{"Exec on the Tx", func() error {
+			_, err := tx.Exec(ctx, "INSERT INTO "+table+" VALUES (1)")
+			return err
+		}},
+		{"Exec on the connection", func() error {
+			_, err := conn.Exec(ctx, "INSERT INTO "+table+" VALUES (2)")
+			return err
+		}},
+		{"Exec with an argument on the connection", func() error {
+			_, err := conn.Exec(ctx, "INSERT INTO "+table+" VALUES ($1)", 3)
+			return err
+		}},
+		{"QueryRow on the connection", func() error {
+			return conn.QueryRow(ctx, "INSERT INTO "+table+" VALUES (4) RETURNING id").Scan(new(int))
+		}},
+		{"SendBatch on the connection", func() error {
+			batch := &gpool.Batch{}
+			batch.Queue("INSERT INTO "+table+" VALUES ($1)", 5)
+			return conn.(gpool.Batcher).SendBatch(ctx, batch).Close()
+		}},
+		{"CopyFrom on the connection", func() error {
+			_, err := conn.(gpool.BulkCopier).CopyFrom(ctx, gpool.CopyRequest{
+				Table:   []string{table},
+				Columns: []string{"id"},
+				Rows:    gpool.CopyFromSlice(1, func(int) ([]any, error) { return []any{6}, nil }),
+			})
+			return err
+		}},
+	} {
+		if err := attempt.run(); sqlState(err) != "25P02" {
+			t.Errorf("%s in the failed transaction = %v, want SQLSTATE 25P02", attempt.name, err)
+		}
+	}
+
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("Rollback() = %v", err)
+	}
+	var rows int
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&rows); err != nil {
+		t.Fatalf("count = %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("%d rows were committed by statements run after the transaction's first statement failed", rows)
+	}
+	// And the connection is idle: VACUUM would be refused inside a transaction.
+	if _, err := conn.Exec(ctx, "VACUUM"); err != nil {
+		t.Fatalf("the connection after it: %v", err)
 	}
 }
 

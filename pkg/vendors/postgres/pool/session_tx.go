@@ -2,42 +2,65 @@
 
 package pool
 
-import "context"
+import (
+	"context"
+	"errors"
 
-// sessionTx is a transaction on a live connection: BEGIN has run, and the
-// statements that follow go to the same session.
+	"github.com/gsoultan/caduceus"
+)
+
+// sessionTx is a transaction on a live connection. caduceus holds its BEGIN
+// back until the first statement and sends the two together, and it is the
+// caduceus transaction that knows whether it is still the one open on the
+// connection, so everything here goes through it and not around it.
 type sessionTx struct {
-	conn *pgConn
+	tx *caduceus.Tx
 }
 
 var _ transaction = sessionTx{}
 
-// Commit sends COMMIT. A transaction that had already failed is rolled back by
-// the server, which says so in the command tag rather than with an error.
+// Commit sends COMMIT, or nothing for a transaction that ran no statement. A
+// transaction that had already failed is rolled back by the server, which says
+// so in the command tag rather than with an error.
 func (t sessionTx) Commit(ctx context.Context) error {
-	tag, err := t.conn.session.exec(ctx, "COMMIT", nil)
-	if err != nil {
-		return err
-	}
-	if tag == "ROLLBACK" {
-		return ErrTxCommitRollback
-	}
-	return nil
+	return inOurWords(t.tx.Commit(ctx))
 }
 
 func (t sessionTx) Rollback(ctx context.Context) error {
-	_, err := t.conn.session.exec(ctx, "ROLLBACK", nil)
-	return err
+	return inOurWords(t.tx.Rollback(ctx))
 }
 
 func (t sessionTx) Exec(ctx context.Context, sql string, args []any) (string, error) {
-	return t.conn.session.exec(ctx, sql, args)
+	args, err := bindable(args)
+	if err != nil {
+		return "", err
+	}
+	tag, err := t.tx.Exec(ctx, sql, args...)
+	return tag, inOurWords(err)
 }
 
 func (t sessionTx) Query(ctx context.Context, sql string, args []any) (resultSet, error) {
-	cursor, err := t.conn.session.query(ctx, sql, args)
+	args, err := bindable(args)
 	if err != nil {
 		return nil, err
 	}
+	cursor, err := t.tx.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, inOurWords(err)
+	}
 	return cursor, nil
+}
+
+// inOurWords maps caduceus's transaction sentinels onto this package's, so a
+// caller matches on one vocabulary rather than reaching through to the driver.
+// caduceus.ErrTxClosed is how a transaction answers once the pool has unwound
+// its connection for someone else.
+func inOurWords(err error) error {
+	switch {
+	case errors.Is(err, caduceus.ErrTxCommitRollback):
+		return ErrTxCommitRollback
+	case errors.Is(err, caduceus.ErrTxClosed):
+		return ErrTxClosed
+	}
+	return err
 }

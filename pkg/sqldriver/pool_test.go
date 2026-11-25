@@ -240,6 +240,62 @@ func TestAbandonedTransactionIsUnwoundOnRelease(t *testing.T) {
 	}
 }
 
+// A Tx kept after its connection was released still settled. Its Commit and
+// Rollback went to the driver, and for a driver whose transaction is the
+// connection itself that commits or rolls back whatever the connection's next
+// caller has open. They also cleared the note that a transaction was open
+// there, so a transaction the next caller abandoned was no longer unwound when
+// they released. A Tx now ends with the acquisition it began on.
+func TestTxKeptPastReleaseSettlesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, settle := range []struct {
+		name string
+		run  func(ctx context.Context, tx gpool.Tx) error
+	}{
+		{"Commit", func(ctx context.Context, tx gpool.Tx) error { return tx.Commit(ctx) }},
+		{"Rollback", func(ctx context.Context, tx gpool.Tx) error { return tx.Rollback(ctx) }},
+	} {
+		t.Run(settle.name, func(t *testing.T) {
+			t.Parallel()
+
+			pool := newTestPool(t, &fakeConnector{}, Config{MaxConns: 1})
+
+			conn, err := pool.Acquire(t.Context())
+			if err != nil {
+				t.Fatalf("Acquire() = %v", err)
+			}
+			kept, err := conn.Begin(t.Context())
+			if err != nil {
+				t.Fatalf("Begin() = %v", err)
+			}
+			driverConn := conn.(*connWrapper).conn().driver.(*fakeDriverConn)
+			conn.Release() // which unwinds the transaction: one rollback
+
+			// MaxConns is 1, so the next caller has the same connection.
+			next, err := pool.Acquire(t.Context())
+			if err != nil {
+				t.Fatalf("Acquire() = %v", err)
+			}
+			if _, err := next.Begin(t.Context()); err != nil {
+				t.Fatalf("the next caller's Begin() = %v", err)
+			}
+
+			if err := settle.run(t.Context(), kept); !errors.Is(err, ErrTxClosed) {
+				t.Errorf("%s() on the Tx kept past Release = %v, want ErrTxClosed", settle.name, err)
+			}
+			if commits, rollbacks := driverConn.commits.Load(), driverConn.rollback.Load(); commits != 0 || rollbacks != 1 {
+				t.Errorf("the driver saw %d commits and %d rollbacks, want only the rollback that unwound the release", commits, rollbacks)
+			}
+
+			next.Release() // without settling: theirs is still the pool's to unwind
+			if got := driverConn.rollback.Load(); got != 2 {
+				t.Errorf("driver Rollback called %d times, want 2: the next caller's abandoned transaction was not unwound", got)
+			}
+		})
+	}
+}
+
 // ResetSession is the hook database/sql itself uses before reusing a connection,
 // so a driver that implements it already knows what has to be cleared.
 func TestReleaseCallsResetSession(t *testing.T) {

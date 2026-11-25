@@ -46,9 +46,10 @@ func (r *fakeRows) Scan(...any) error {
 // fakeTx is a scripted transaction counting how often it was settled, which is
 // how the tests detect a commit and a deferred rollback both reaching the server.
 type fakeTx struct {
-	commits   atomic.Int32
-	rollbacks atomic.Int32
-	err       error
+	commits    atomic.Int32
+	rollbacks  atomic.Int32
+	statements atomic.Int32
+	err        error
 }
 
 var _ transaction = (*fakeTx)(nil)
@@ -63,8 +64,21 @@ func (t *fakeTx) Rollback(context.Context) error {
 	return t.err
 }
 
-func (t *fakeTx) Exec(context.Context, string, []any) (string, error) { return "", t.err }
+func (t *fakeTx) Exec(context.Context, string, []any) (string, error) {
+	t.statements.Add(1)
+	return "", t.err
+}
 
 func (t *fakeTx) Query(context.Context, string, []any) (resultSet, error) {
+	t.statements.Add(1)
 	return &fakeRows{}, t.err
 }
+
+// fakeLease is an acquisition a test hands back when it chooses.
+type fakeLease struct {
+	released atomic.Bool
+}
+
+var _ lease = (*fakeLease)(nil)
+
+func (l *fakeLease) Released() bool { return l.released.Load() }

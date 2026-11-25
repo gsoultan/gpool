@@ -19,6 +19,11 @@ import (
 // Statements inside the transaction go out on the connection, because that is
 // what a database/sql driver's transaction is — the connection is in a
 // transactional state, not a separate object to route through.
+//
+// For the same reason a transaction is over once its connection has been
+// released: the connection is the next caller's from then on, and for a driver
+// whose transaction is the connection itself, so is whatever a Commit sent
+// there would commit.
 type pgTx struct {
 	tx    driver.Tx
 	owner *connWrapper
@@ -33,7 +38,7 @@ func newTx(tx driver.Tx, owner *connWrapper) *pgTx {
 
 // Commit commits the transaction.
 func (t *pgTx) Commit(context.Context) error {
-	if !t.done.CompareAndSwap(false, true) {
+	if !t.done.CompareAndSwap(false, true) || t.owner.live() != nil {
 		return ErrTxClosed
 	}
 	defer t.owner.conn().settled()
@@ -44,7 +49,7 @@ func (t *pgTx) Commit(context.Context) error {
 // Rollback rolls the transaction back. Called after a successful Commit it
 // returns ErrTxClosed, which a deferred rollback can safely ignore.
 func (t *pgTx) Rollback(context.Context) error {
-	if !t.done.CompareAndSwap(false, true) {
+	if !t.done.CompareAndSwap(false, true) || t.owner.live() != nil {
 		return ErrTxClosed
 	}
 	defer t.owner.conn().settled()

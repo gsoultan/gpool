@@ -51,11 +51,16 @@ type cursorRow struct {
 	cursor cursor
 }
 
-func (c *pgConn) begin(ctx context.Context) (gpool.Tx, error) {
-	if _, err := c.session.exec(ctx, "BEGIN", nil); err != nil {
+// begin starts a transaction for the caller holding the connection under held,
+// or for the pool itself with none.
+func (c *pgConn) begin(ctx context.Context, held lease) (gpool.Tx, error) {
+	// No round trip: caduceus sends BEGIN with the transaction's first
+	// statement.
+	tx, err := c.session.db.Begin(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return newTx(sessionTx{conn: c}), nil
+	return newTx(sessionTx{tx: tx}, held), nil
 }
 
 // ping sends a comment, the cheapest statement there is.
@@ -86,6 +91,6 @@ func (d detachedConn) QueryRow(ctx context.Context, sql string, args ...any) gpo
 	return d.c.queryRow(ctx, sql, args, nil)
 }
 
-func (d detachedConn) Begin(ctx context.Context) (gpool.Tx, error) { return d.c.begin(ctx) }
+func (d detachedConn) Begin(ctx context.Context) (gpool.Tx, error) { return d.c.begin(ctx, nil) }
 
 func (d detachedConn) Ping(ctx context.Context) error { return d.c.ping(ctx) }

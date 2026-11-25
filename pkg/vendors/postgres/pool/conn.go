@@ -70,12 +70,14 @@ func (c *connWrapper) QueryRow(ctx context.Context, sql string, args ...any) gpo
 }
 
 // Begin starts a transaction on this connection. The transaction does not own the
-// connection; release it yourself once the transaction has finished.
+// connection; release it yourself once the transaction has finished. On a
+// connection already in a transaction, begun by a statement run on it, Begin
+// returns ErrInTransaction.
 func (c *connWrapper) Begin(ctx context.Context) (gpool.Tx, error) {
 	if err := c.live(); err != nil {
 		return nil, err
 	}
-	return c.conn().begin(ctx)
+	return c.conn().begin(ctx, &c.handle)
 }
 
 // Ping verifies the connection is still usable.

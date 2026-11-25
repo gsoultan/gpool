@@ -281,6 +281,57 @@ func TestListenDoesNotLeakToTheNextCaller(t *testing.T) {
 	}
 }
 
+// A wait for a notification that ended with its context could leave a read
+// deadline in the past on the connection. The next statement run under a
+// context that cannot end then failed with a bare i/o timeout and left its
+// reply unread, and from there every statement on that connection, and every
+// caller the pool handed it to, was answered with the reply to the one before.
+func TestWaitThatTimesOutLeavesTheConnectionInStep(t *testing.T) {
+	if testing.Short() {
+		t.Skip("a few seconds of waits")
+	}
+	pool := newPool(t, postgrespool.Config{MaxConns: 1})
+	bg := context.Background()
+
+	const rounds, held = 2000, 50
+	for round := 0; round < rounds; round += held {
+		conn, err := pool.Acquire(bg)
+		if err != nil {
+			t.Fatalf("round %d: Acquire() = %v", round, err)
+		}
+		listener := conn.(gpool.Notifier)
+		if err := listener.Listen(bg, "gpool_nobody_notifies"); err != nil {
+			conn.Release()
+			t.Fatalf("round %d: Listen() = %v", round, err)
+		}
+		for n := round; n < round+held; n++ {
+			ctx, cancel := context.WithTimeout(bg, 300*time.Microsecond)
+			_, err := listener.WaitForNotification(ctx)
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				conn.Release()
+				t.Fatalf("round %d: WaitForNotification() = %v, want the context's deadline", n, err)
+			}
+			var got int
+			if err := conn.QueryRow(bg, "SELECT $1::int4", n).Scan(&got); err != nil || got != n {
+				conn.Release()
+				t.Fatalf("round %d: the statement after the wait = %d, %v", n, got, err)
+			}
+		}
+		conn.Release()
+
+		// MaxConns is 1, so the next caller has the same connection.
+		var got int
+		if err := pool.QueryRow(bg, "SELECT $1::int4", -round).Scan(&got); err != nil || got != -round {
+			t.Fatalf("round %d: the next caller's statement = %d, %v", round, got, err)
+		}
+	}
+	// A connection that fell out of step would have been replaced.
+	if got := pool.Stat().TotalConnections(); got != 1 {
+		t.Errorf("TotalConnections() = %d, want 1", got)
+	}
+}
+
 func TestNotifierValidatesChannel(t *testing.T) {
 	pool := newPool(t, postgrespool.Config{MaxConns: 2})
 

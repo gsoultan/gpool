@@ -35,9 +35,10 @@ defaulting to 64. Measured KiB/connection: disabled 25.8, cap16 26.1, **cap64 28
 cap128 36.2, cap512 71.2. 64 sits within 10% of the floor while still caching a
 typical service's query set.
 
-`DisableCache` (-1) turns a cache off. A disabled statement cache also forces
-`QueryExecModeExec`, same as `ResetQuery` does — the default mode has nowhere to
-cache into.
+`DisableCache` (-1) turns a cache off. A disabled statement cache, like a
+`ResetQuery`, has every statement parsed into the unnamed statement in the Sync
+that runs it; `DescriptionCacheCapacity` then bounds what is remembered of each
+(see `mem:pool`).
 
 ## Invariants this produced
 

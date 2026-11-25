@@ -14,21 +14,39 @@ import (
 // Commit and Rollback both settle the transaction exactly once. The canonical Go
 // idiom pairs a deferred Rollback with a Commit on the happy path, so the second
 // call is expected: it returns ErrTxClosed and touches nothing.
+//
+// A transaction is over, too, once the connection it began on has been
+// released, however the transaction itself was left: the connection is the next
+// caller's from then on, and so is whatever transaction is open on it.
 type pgTx struct {
-	tx   transaction
+	tx transaction
+	// held is the acquisition the transaction began on, nil for a connection
+	// the pool does not own yet.
+	held lease
 	done atomic.Bool
 }
 
 var _ gpool.Tx = (*pgTx)(nil)
 
-func newTx(tx transaction) *pgTx {
-	return &pgTx{tx: tx}
+func newTx(tx transaction, held lease) *pgTx {
+	return &pgTx{tx: tx, held: held}
+}
+
+// over reports whether the transaction can no longer be used.
+func (t *pgTx) over() bool {
+	return t.done.Load() || t.gone()
+}
+
+// gone reports whether the connection the transaction began on has gone back
+// to the pool.
+func (t *pgTx) gone() bool {
+	return t.held != nil && t.held.Released()
 }
 
 // Commit commits the transaction. If it had already failed, the server rolls it
 // back instead, and Commit returns ErrTxCommitRollback.
 func (t *pgTx) Commit(ctx context.Context) error {
-	if !t.done.CompareAndSwap(false, true) {
+	if !t.done.CompareAndSwap(false, true) || t.gone() {
 		return ErrTxClosed
 	}
 	return t.tx.Commit(ctx)
@@ -37,7 +55,7 @@ func (t *pgTx) Commit(ctx context.Context) error {
 // Rollback rolls the transaction back. Called after a successful Commit it returns
 // ErrTxClosed, which a deferred rollback can safely ignore.
 func (t *pgTx) Rollback(ctx context.Context) error {
-	if !t.done.CompareAndSwap(false, true) {
+	if !t.done.CompareAndSwap(false, true) || t.gone() {
 		return ErrTxClosed
 	}
 	return t.tx.Rollback(ctx)
@@ -45,7 +63,7 @@ func (t *pgTx) Rollback(ctx context.Context) error {
 
 // Exec executes a statement inside the transaction.
 func (t *pgTx) Exec(ctx context.Context, sql string, args ...any) (gpool.Result, error) {
-	if t.done.Load() {
+	if t.over() {
 		return nil, ErrTxClosed
 	}
 	tag, err := t.tx.Exec(ctx, sql, args)
@@ -58,7 +76,7 @@ func (t *pgTx) Exec(ctx context.Context, sql string, args ...any) (gpool.Result,
 // Query executes a query inside the transaction. The returned Rows never own a
 // connection: the transaction's connection belongs to whoever acquired it.
 func (t *pgTx) Query(ctx context.Context, sql string, args ...any) (gpool.Rows, error) {
-	if t.done.Load() {
+	if t.over() {
 		return nil, ErrTxClosed
 	}
 	rows, err := t.tx.Query(ctx, sql, args)
@@ -70,7 +88,7 @@ func (t *pgTx) Query(ctx context.Context, sql string, args ...any) (gpool.Rows, 
 
 // QueryRow executes a query inside the transaction expected to return at most one row.
 func (t *pgTx) QueryRow(ctx context.Context, sql string, args ...any) gpool.Row {
-	if t.done.Load() {
+	if t.over() {
 		return errorRow{err: ErrTxClosed}
 	}
 	rows, err := t.tx.Query(ctx, sql, args)

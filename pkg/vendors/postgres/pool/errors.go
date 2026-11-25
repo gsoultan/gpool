@@ -45,4 +45,26 @@ var (
 	// ErrTxCommitRollback is returned by Commit when the transaction had already
 	// failed, so the server rolled it back instead of committing.
 	ErrTxCommitRollback = errors.New("gpool/postgres: commit unexpectedly resulted in rollback")
+
+	// ErrTxNotBegun is returned by a transaction whose BEGIN the server
+	// refused. BEGIN travels with the first statement, so that statement
+	// reports the server's own error and does not run. From then until the
+	// transaction is committed or rolled back, the Tx and the connection it is
+	// on return this for everything, so that nothing runs outside the
+	// transaction the caller believes is open. Begin sends a plain BEGIN,
+	// which a server has little reason to refuse.
+	ErrTxNotBegun = caduceus.ErrTxNotBegun
+
+	// ErrInTransaction is returned by Begin on a connection already in a
+	// transaction. PostgreSQL itself only warns and carries on in the one
+	// already open, which would leave the caller's Rollback undoing work it
+	// believes was committed earlier, so it is refused instead.
+	ErrInTransaction = caduceus.ErrInTransaction
+
+	// ErrResultChanged is returned for a column that cannot be read because
+	// the statement's result changed type since it was described: a table
+	// altered under a statement remembered on a connection that keeps nothing
+	// on the server. The statement ran, and a write it made stands; the next
+	// execution asks the server about it afresh.
+	ErrResultChanged = caduceus.ErrResultChanged
 )

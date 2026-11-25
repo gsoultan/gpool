@@ -197,9 +197,16 @@ if got wrong:
   Not re-parsing would run their statement for this client — wrong results, not
   an error. Any collision is closed first, then re-parsed.
 - **An injected Parse produces a ParseComplete the client never sent a Parse
-  for.** Clients count replies to their own messages, so `s.expect` queues the
-  completions to swallow and `feedBackend` drops them. Same for the injected Close
-  and its CloseComplete.
+  for.** Clients count replies to their own messages, so `s.owed` (`owed.go`)
+  queues every reply owed for a Parse or Close, injected or the client's, plus a
+  marker per Sync; `feedBackend` swallows the injected ones. Same for the
+  injected Close and its CloseComplete.
+- **The server may skip what was sent.** After an error it skips everything up
+  to the Sync. Changes to the backend's and the client's statement sets are made
+  as messages are sent (later messages are decided on them) and each `owed`
+  entry holds how to undo its change; entries still owed at their Sync's
+  ReadyForQuery are undone, last first (`synced`). Recording on send alone ran
+  another client's same-named statement and swallowed the client's own reply.
 
 Only P/B/D/C are looked at as whole messages, in place in the worker's buffer
 when they arrived whole, and those are per query. Overhead was below the benchmark's noise floor —

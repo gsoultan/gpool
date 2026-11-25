@@ -4,13 +4,14 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/gpool"
 	postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
 )
@@ -44,20 +45,29 @@ func newPooledPool(t *testing.T, config postgrespool.Config) gpool.Pool {
 	return pool
 }
 
-// hammer runs the same parameterised query from many goroutines. Repeating one
-// statement across several backends is what exposes a client-side statement cache
-// whose names the server does not share.
+// errOtherStatement is an answer the statement asked could not have given: its
+// Bind reached a backend where some other statement had been parsed last.
+var errOtherStatement = errors.New("the answer is another statement's")
+
+// hammer runs parameterised queries from many goroutines and returns the first
+// failure: an error, or an answer that is not the statement's own.
+//
+// Every goroutine runs one statement they all share and statements of its own,
+// alone and in a batch. Repeating one statement across several backends is what
+// exposes a client-side statement cache whose names the server does not share.
+// A statement of its own for each goroutine is what exposes a statement bound
+// on a backend where someone else's was parsed, because only then is the answer
+// one that no other statement gives.
 func hammer(t *testing.T, pool gpool.Pool, workers, each int) error {
 	t.Helper()
 
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 
-	for range workers {
+	for worker := range workers {
 		wg.Go(func() {
 			for i := range each {
-				var value int
-				if err := pool.QueryRow(context.Background(), "SELECT $1::int", i).Scan(&value); err != nil {
+				if err := hammerOnce(pool, worker, i); err != nil {
 					select {
 					case errs <- err:
 					default:
@@ -72,16 +82,84 @@ func hammer(t *testing.T, pool gpool.Pool, workers, each int) error {
 	return <-errs
 }
 
+// hammerOnce is one round of one goroutine of hammer.
+func hammerOnce(pool gpool.Pool, worker, i int) error {
+	ctx := context.Background()
+	// own returns a statement only this goroutine runs, and its answer for i.
+	own := func(n int) (string, int) {
+		offset := 1000 * (10*worker + n)
+		return fmt.Sprintf("SELECT $1::int + %d", offset), i + offset
+	}
+	answered := func(sql string, want int, scan func(*int) error) error {
+		var got int
+		if err := scan(&got); err != nil {
+			return err
+		}
+		if got != want {
+			return fmt.Errorf("%w: %s with %d gave %d, want %d", errOtherStatement, sql, i, got, want)
+		}
+		return nil
+	}
+
+	const shared = "SELECT $1::int"
+	if err := answered(shared, i, func(got *int) error { return pool.QueryRow(ctx, shared, i).Scan(got) }); err != nil {
+		return err
+	}
+	sql, want := own(0)
+	if err := answered(sql, want, func(got *int) error { return pool.QueryRow(ctx, sql, i).Scan(got) }); err != nil {
+		return err
+	}
+	if i%5 != 0 {
+		return nil
+	}
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	batch := &gpool.Batch{}
+	for _, n := range []int{1, 2, 1} {
+		sql, _ := own(n)
+		batch.Queue(sql, i)
+	}
+	results := conn.(gpool.Batcher).SendBatch(ctx, batch)
+	for _, n := range []int{1, 2, 1} {
+		sql, want := own(n)
+		if err := answered(sql, want, func(got *int) error { return results.QueryRow().Scan(got) }); err != nil {
+			return errors.Join(err, results.Close())
+		}
+	}
+	return results.Close()
+}
+
 // Disabling the statement cache is the configuration that works against every
 // PgBouncer, of any version and any pool_mode. It costs the cache, not correctness.
+//
+// It used to cost correctness. A statement was parsed and described in one
+// Sync and bound in the next, on the unnamed statement, and in transaction mode
+// the two could be given different backends: the Bind then ran whatever another
+// client had parsed last there, with this client's arguments. This test did not
+// see it, because every worker ran the same statement and nobody looked at the
+// answers. With a statement of its own for each of 12 clients, 4,393 of 4,800
+// answers through PgBouncer 1.22 were another client's. A statement is now
+// parsed in the Sync that binds it.
 func TestPgBouncerWithStatementCacheDisabled(t *testing.T) {
-	pool := newPooledPool(t, postgrespool.Config{
-		MaxConns:               8,
-		StatementCacheCapacity: postgrespool.DisableCache,
-	})
+	for name, descriptions := range map[string]int{
+		"remembering descriptions": 0,
+		"remembering nothing":      postgrespool.DisableCache,
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool := newPooledPool(t, postgrespool.Config{
+				MaxConns:                 8,
+				StatementCacheCapacity:   postgrespool.DisableCache,
+				DescriptionCacheCapacity: descriptions,
+			})
 
-	if err := hammer(t, pool, 40, 5); err != nil {
-		t.Fatalf("gpool with the statement cache disabled should work behind any PgBouncer: %v", err)
+			if err := hammer(t, pool, 40, 25); err != nil {
+				t.Fatalf("gpool with the statement cache disabled should work behind any PgBouncer: %v", err)
+			}
+		})
 	}
 }
 
@@ -103,9 +181,13 @@ func TestPgBouncerWithStatementCacheEnabled(t *testing.T) {
 		return
 	}
 
-	// 42P05 duplicate_prepared_statement, 26000 invalid_sql_statement_name.
-	message := err.Error()
-	if strings.Contains(message, "42P05") || strings.Contains(message, "26000") {
+	// 42P05 duplicate_prepared_statement, 26000 invalid_sql_statement_name: a
+	// name the backend already has from another client, or does not have at
+	// all. A name it has from another client for another statement is not
+	// refused, and shows as that statement's answer.
+	var refused *wire.Error
+	named := errors.As(err, &refused) && (refused.Code == "42P05" || refused.Code == "26000")
+	if named || errors.Is(err, errOtherStatement) {
 		t.Logf("statement caching is unsupported by this proxy, as expected without "+
 			"max_prepared_statements: %v", err)
 		t.Log("remedy: postgrespool.Config{StatementCacheCapacity: postgrespool.DisableCache}")

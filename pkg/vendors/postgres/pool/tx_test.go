@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -14,7 +15,7 @@ func TestTxCommitWithDeferredRollback(t *testing.T) {
 	t.Parallel()
 
 	driver := &fakeTx{}
-	tx := newTx(driver)
+	tx := newTx(driver, nil)
 
 	err := func() error {
 		defer func() { _ = tx.Rollback(t.Context()) }()
@@ -36,7 +37,7 @@ func TestTxRollbackWithDeferredRollback(t *testing.T) {
 	t.Parallel()
 
 	driver := &fakeTx{}
-	tx := newTx(driver)
+	tx := newTx(driver, nil)
 
 	func() {
 		defer func() { _ = tx.Rollback(t.Context()) }()
@@ -90,7 +91,7 @@ func TestTxSettlesExactlyOnce(t *testing.T) {
 			t.Parallel()
 
 			driver := &fakeTx{}
-			tx := newTx(driver)
+			tx := newTx(driver, nil)
 
 			if err := tt.call(tx); !errors.Is(err, ErrTxClosed) {
 				t.Fatalf("second settle = %v, want ErrTxClosed", err)
@@ -108,7 +109,7 @@ func TestTxSettlesExactlyOnce(t *testing.T) {
 func TestTxRefusesUseAfterSettle(t *testing.T) {
 	t.Parallel()
 
-	tx := newTx(&fakeTx{})
+	tx := newTx(&fakeTx{}, nil)
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatalf("Commit() = %v", err)
 	}
@@ -121,5 +122,53 @@ func TestTxRefusesUseAfterSettle(t *testing.T) {
 	}
 	if err := tx.QueryRow(t.Context(), "SELECT 1").Scan(); !errors.Is(err, ErrTxClosed) {
 		t.Errorf("QueryRow().Scan() = %v, want ErrTxClosed", err)
+	}
+}
+
+// A Tx kept after its connection went back to the pool stayed live whenever the
+// release found no transaction to unwind: one the caller had ended in SQL, with
+// a COMMIT run as a statement. Its Exec then ran on the connection the next
+// caller held, inside their transaction, and its Commit committed that
+// transaction for them. A Tx is now tied to the acquisition it began on.
+func TestTxKeptPastReleaseReachesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, use := range []struct {
+		name string
+		run  func(ctx context.Context, tx *pgTx) error
+	}{
+		{"Exec", func(ctx context.Context, tx *pgTx) error {
+			_, err := tx.Exec(ctx, "SELECT 1")
+			return err
+		}},
+		{"Query", func(ctx context.Context, tx *pgTx) error {
+			_, err := tx.Query(ctx, "SELECT 1")
+			return err
+		}},
+		{"QueryRow", func(ctx context.Context, tx *pgTx) error { return tx.QueryRow(ctx, "SELECT 1").Scan() }},
+		{"Commit", func(ctx context.Context, tx *pgTx) error { return tx.Commit(ctx) }},
+		{"Rollback", func(ctx context.Context, tx *pgTx) error { return tx.Rollback(ctx) }},
+	} {
+		t.Run(use.name, func(t *testing.T) {
+			t.Parallel()
+
+			driver := &fakeTx{}
+			held := &fakeLease{}
+			tx := newTx(driver, held)
+
+			if _, err := tx.Exec(t.Context(), "SELECT 1"); err != nil {
+				t.Fatalf("Exec() while the connection is held = %v", err)
+			}
+			held.released.Store(true)
+
+			if err := use.run(t.Context(), tx); !errors.Is(err, ErrTxClosed) {
+				t.Errorf("%s() = %v, want ErrTxClosed", use.name, err)
+			}
+			statements, commits, rollbacks := driver.statements.Load(), driver.commits.Load(), driver.rollbacks.Load()
+			if statements != 1 || commits != 0 || rollbacks != 0 {
+				t.Errorf("the connection saw %d statements, %d commits and %d rollbacks, want only the statement run while it was held",
+					statements, commits, rollbacks)
+			}
+		})
 	}
 }

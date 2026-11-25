@@ -152,19 +152,23 @@ func TestConfigResetQueryDisablesTheStatementCache(t *testing.T) {
 	}
 }
 
-// The per-connection statement cache is multiplied by MaxConns, so its default
-// is bounded and an explicit capacity, including none, is honoured.
+// The per-connection caches are multiplied by MaxConns, so their defaults are
+// bounded and an explicit capacity, including none, is honoured. descriptions is
+// what a connection that keeps no statements on the server remembers of them
+// instead, and is resolved whether or not it will be used.
 func TestConfigBoundsPerConnectionCaches(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		config Config
-		want   int
+		name         string
+		config       Config
+		want         int
+		descriptions int
 	}{
-		{name: "defaults are bounded", config: Config{ConnString: testConnString}, want: DefaultStatementCacheCapacity},
-		{name: "explicit capacity is honoured", config: Config{ConnString: testConnString, StatementCacheCapacity: 256}, want: 256},
-		{name: "the cache can be disabled", config: Config{ConnString: testConnString, StatementCacheCapacity: DisableCache}, want: 0},
+		{name: "defaults are bounded", config: Config{ConnString: testConnString}, want: DefaultStatementCacheCapacity, descriptions: DefaultDescriptionCacheCapacity},
+		{name: "explicit capacity is honoured", config: Config{ConnString: testConnString, StatementCacheCapacity: 256, DescriptionCacheCapacity: 128}, want: 256, descriptions: 128},
+		{name: "the cache can be disabled", config: Config{ConnString: testConnString, StatementCacheCapacity: DisableCache}, want: 0, descriptions: DefaultDescriptionCacheCapacity},
+		{name: "and so can remembering descriptions", config: Config{ConnString: testConnString, StatementCacheCapacity: DisableCache, DescriptionCacheCapacity: DisableCache}, want: 0, descriptions: 0},
 	}
 
 	for _, tt := range tests {
@@ -177,6 +181,9 @@ func TestConfigBoundsPerConnectionCaches(t *testing.T) {
 			}
 			if got.statements != tt.want {
 				t.Errorf("statements = %d, want %d", got.statements, tt.want)
+			}
+			if got.descriptions != tt.descriptions {
+				t.Errorf("descriptions = %d, want %d", got.descriptions, tt.descriptions)
 			}
 		})
 	}
@@ -197,5 +204,8 @@ func TestConfigParseIsOrderIndependent(t *testing.T) {
 
 	if raw.statements != defaulted.statements {
 		t.Errorf("statements: raw %d, defaulted %d", raw.statements, defaulted.statements)
+	}
+	if raw.descriptions != defaulted.descriptions {
+		t.Errorf("descriptions: raw %d, defaulted %d", raw.descriptions, defaulted.descriptions)
 	}
 }

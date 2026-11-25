@@ -308,9 +308,18 @@ Two details are what make it correct rather than merely working:
 - **An injected `Parse` produces a `ParseComplete` the client never asked for.**
   A client counts replies to its own messages, so those completions are swallowed
   on the way back rather than forwarded.
+- **The server may skip what the proxy sent.** After an error it skips every
+  message up to the `Sync`, the proxy's injected `Close` and `Parse` among them,
+  and the client's own. Each is recorded as it is sent, since the messages behind
+  it are decided on that record, and each still unanswered when its `Sync`'s
+  `ReadyForQuery` arrives is undone. Recording them as done used to leave the
+  proxy believing a backend held one client's statement when it held another's
+  of the same name, which then ran in its place, and to swallow a reply that was
+  the client's own.
 
-Both are covered by tests that fail without the feature, with
-`SQLSTATE 42P05: prepared statement "…" already exists`.
+Each is covered by a test that fails without it, with
+`SQLSTATE 42P05: prepared statement "…" already exists` or another client's
+result.
 
 The cost was not measurable against this benchmark's noise: reading three of the
 roughly five messages per query into a reused buffer and looking up a name, set

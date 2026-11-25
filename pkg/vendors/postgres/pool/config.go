@@ -26,9 +26,10 @@ const (
 	// raising it is one field away. The cache's memory grows with use rather than
 	// being reserved up front, so an idle connection costs nothing for it.
 	//
-	// DefaultDescriptionCacheCapacity is kept for compatibility. Statement
-	// descriptions are held by the statement cache, so there is no second cache
-	// to bound.
+	// DefaultDescriptionCacheCapacity bounds what a connection that keeps no
+	// statements on the server remembers of them instead: the parameter and
+	// column types of each, which is a few hundred bytes a statement, held by
+	// the client alone.
 	DefaultStatementCacheCapacity   = 64
 	DefaultDescriptionCacheCapacity = 64
 )
@@ -104,14 +105,24 @@ type Config struct {
 
 	// StatementCacheCapacity is how many prepared statements each connection caches.
 	// Defaults to DefaultStatementCacheCapacity; DisableCache turns it off, which
-	// also selects an execution mode that does not name statements server-side.
+	// also selects an execution mode that does not name statements server-side:
+	// each statement is parsed in the same Sync that runs it, so nothing on the
+	// server outlives a Sync. That is the mode for a pooler in transaction mode
+	// that does not track prepared statements.
 	//
 	// This is the single largest per-connection memory cost. Raise it for a service
 	// with wide query variety; lower it when connection count matters more.
 	StatementCacheCapacity int
 
-	// DescriptionCacheCapacity is accepted and validated for compatibility, and
-	// otherwise unused: descriptions live with the statements they describe.
+	// DescriptionCacheCapacity matters only when no statements are kept on the
+	// server: with StatementCacheCapacity set to DisableCache, or with a
+	// ResetQuery. It is how many statements each connection remembers the
+	// parameter and column types of, so that a statement it has run before takes
+	// one round trip and not a second to ask about it first. Nothing is kept on
+	// the server for it, the columns are checked against the server's every time
+	// a statement runs, and a ResetQuery clears it with everything else.
+	// Defaults to DefaultDescriptionCacheCapacity; DisableCache remembers nothing,
+	// and every statement is asked about before it runs.
 	DescriptionCacheCapacity int
 
 	// BeforeConnect is called with a copy of the parsed connection config before
@@ -196,11 +207,13 @@ func (c Config) pooling() pooling.Config {
 	}
 }
 
-// settings is a Config resolved for dialling: the parsed connection string and
-// how many statements each connection may keep prepared.
+// settings is a Config resolved for dialling: the parsed connection string,
+// how many statements each connection may keep prepared, and how many it may
+// remember the description of when it keeps none.
 type settings struct {
-	conn       *wire.Config
-	statements int
+	conn         *wire.Config
+	statements   int
+	descriptions int
 }
 
 // parse resolves the connection string once, up front, so that opening a
@@ -208,8 +221,8 @@ type settings struct {
 //
 // A reset query such as DISCARD ALL deallocates prepared statements behind the
 // cache's back, and a disabled cache has nowhere to keep them, so either way
-// each query is parsed into the unnamed statement instead. Parameters are still
-// bound by the server.
+// each query is parsed into the unnamed statement instead, in the Sync that
+// runs it. Parameters are still bound by the server.
 func (c Config) parse() (*settings, error) {
 	connConfig, err := wire.ParseConfig(c.ConnString)
 	if err != nil {
@@ -219,5 +232,6 @@ func (c Config) parse() (*settings, error) {
 	if c.ResetQuery != "" {
 		statements = 0
 	}
-	return &settings{conn: connConfig, statements: statements}, nil
+	descriptions := cacheCapacity(c.DescriptionCacheCapacity, DefaultDescriptionCacheCapacity)
+	return &settings{conn: connConfig, statements: statements, descriptions: descriptions}, nil
 }

@@ -49,11 +49,14 @@ type session struct {
 	// can be replayed onto whichever backend the next transaction lands on.
 	statements statements
 
-	// expect is the completion messages the backend owes for work this proxy
-	// injected rather than the client sending it. They are swallowed on the way
-	// back, because a client counting replies to its own messages must not
-	// receive one for a message it never sent.
-	expect []byte
+	// owed is the replies the backend owes for the Parse and Close messages
+	// sent since the last ReadyForQuery, and for the messages that end a Sync,
+	// from owed[paid] on. A reply to a message the proxy injected is swallowed
+	// on the way back, because a client counting replies to its own messages
+	// must not receive one for a message it never sent; and a Parse or Close
+	// the server skipped is undone in the record of what the backend holds.
+	owed []owed
+	paid int
 
 	// pending counts client messages that will each be answered with exactly one
 	// ReadyForQuery, and open says the client has since sent extended-protocol
@@ -297,6 +300,7 @@ func (s *session) feedClient(data []byte) []byte {
 
 		switch {
 		case endsTransactionUnit(kind):
+			s.owe(owed{})
 			s.pending++
 			s.open = false
 		case opensTransactionUnit(kind):
@@ -324,16 +328,23 @@ func (s *session) reconcile(kind byte, message []byte, before func() bool) {
 	target := s.backend
 	body := message[headerSize:]
 
-	// inject writes a message the client did not send, and records the
-	// completion the backend will answer with so it can be swallowed.
+	// inject writes a message the client did not send, and records the reply
+	// the backend will answer with so it can be swallowed.
 	injected := false
-	inject := func(message []byte, completion byte) {
+	inject := func(message []byte, reply owed) {
 		if s.closed || (!injected && !before()) {
 			return
 		}
 		injected = true
 		target.sock.queue(s.worker, message)
-		s.expect = append(s.expect, completion)
+		reply.injected = true
+		s.owe(reply)
+	}
+
+	// discard closes a statement on the backend.
+	discard := func(name string) {
+		inject(closeStatement(name), s.change(msgCloseComplete, name))
+		target.prepared.forget(name)
 	}
 
 	// hold records a statement as present on the backend, closing whatever had
@@ -346,44 +357,57 @@ func (s *session) reconcile(kind byte, message []byte, before func() bool) {
 	// own set still has the Parse, so the next backend it lands on gets it
 	// replayed.
 	hold := func(name string, message []byte) {
-		if evicted, didEvict := target.prepared.remember(name, message); didEvict {
-			inject(closeStatement(evicted), msgCloseComplete)
+		if evicted, evictedMessage, didEvict := target.prepared.displace(name, message); didEvict {
+			inject(closeStatement(evicted), owed{completion: msgCloseComplete, name: evicted,
+				changed: true, before: evictedMessage, had: true})
 		}
 	}
 
 	switch kind {
 	case msgParse:
+		// Every Parse is answered, the unnamed statement's too, so every one is
+		// owed a reply. The unnamed statement is replaced by every Parse and
+		// never replayed.
 		name, ok := parseName(body)
-		if !ok || name == "" {
-			// The unnamed statement is replaced by every Parse and never replayed.
-			return
+		reply := owed{completion: msgParseComplete}
+		if ok && name != "" {
+			// A name already on this backend belongs to whoever put it there,
+			// which may be a different client with different SQL. Re-parsing over
+			// it fails with 42P05, and *not* re-parsing would silently run their
+			// statement instead of this one — so it is closed first, either way.
+			if _, held := target.prepared.peek(name); held {
+				discard(name)
+			}
+			reply = s.change(msgParseComplete, name)
+			reply.mine = true
+			reply.ownBefore, reply.ownHad = s.statements.peek(name)
+			// Whatever this displaces from the client's own set simply stops
+			// being replayable. It is still on the backend that has it, and that
+			// backend's limit is what eventually takes it off the server.
+			s.statements.remember(name, message)
+			remembered, _ := s.statements.lookup(name)
+			hold(name, remembered)
 		}
-		// A name already on this backend belongs to whoever put it there, which
-		// may be a different client with different SQL. Re-parsing over it fails
-		// with 42P05, and *not* re-parsing would silently run their statement
-		// instead of this one — so it is closed first, either way.
-		if _, held := target.prepared.lookup(name); held {
-			inject(closeStatement(name), msgCloseComplete)
-		}
-		// Whatever this displaces from the client's own set simply stops being
-		// replayable. It is still on the backend that has it, and that backend's
-		// limit is what eventually takes it off the server.
-		s.statements.remember(name, message)
-		remembered, _ := s.statements.lookup(name)
-		hold(name, remembered)
+		s.owe(reply)
 
-	case msgBind, msgDescribe, msgClose:
+	case msgClose:
+		// A portal's Close is answered too.
+		reply := owed{completion: msgCloseComplete}
+		if name, ok := statementNameOf(kind, body); ok && len(name) > 0 {
+			// The client is deallocating it, so neither side should remember it.
+			reply = s.change(msgCloseComplete, string(name))
+			reply.mine = true
+			reply.ownBefore, reply.ownHad = s.statements.peek(reply.name)
+			target.prepared.forget(reply.name)
+			s.statements.forget(reply.name)
+		}
+		s.owe(reply)
+
+	case msgBind, msgDescribe:
 		name, ok := statementNameOf(kind, body)
 		if !ok || len(name) == 0 {
 			return
 		}
-		if kind == msgClose {
-			// The client is deallocating it, so neither side should remember it.
-			target.prepared.forget(string(name))
-			s.statements.forget(string(name))
-			return
-		}
-
 		remembered, known := s.statements.find(name)
 		if !known {
 			// The client is binding something it never parsed on this session.
@@ -395,11 +419,74 @@ func (s *session) reconcile(kind byte, message []byte, before func() bool) {
 			if bytes.Equal(held, remembered) {
 				return
 			}
-			inject(closeStatement(string(name)), msgCloseComplete)
+			discard(string(name))
 		}
-		inject(remembered, msgParseComplete)
+		inject(remembered, s.change(msgParseComplete, string(name)))
 		hold(string(name), remembered)
 	}
+}
+
+// change is the reply owed for a message that changes what the backend holds
+// under name, with what it holds there now.
+func (s *session) change(completion byte, name string) owed {
+	before, had := s.backend.prepared.peek(name)
+	return owed{completion: completion, name: name, changed: true, before: before, had: had}
+}
+
+// owe records a reply the backend owes.
+func (s *session) owe(reply owed) {
+	s.owed = append(s.owed, reply)
+}
+
+// owes reports whether the backend still owes any reply.
+func (s *session) owes() bool {
+	return s.paid < len(s.owed)
+}
+
+// answered takes a ParseComplete or CloseComplete off what is owed, and
+// reports whether the client is not to see it.
+func (s *session) answered(kind byte) (swallow bool) {
+	if !s.owes() || s.owed[s.paid].completion != kind || kind == 0 {
+		return false
+	}
+	swallow = s.owed[s.paid].injected
+	s.paid++
+	s.settleOwed()
+	return swallow
+}
+
+// synced takes a ReadyForQuery off what is owed. Any Parse or Close still
+// owed in front of it was skipped by the server, and is undone, the last
+// first.
+func (s *session) synced(source *backend) {
+	end := s.paid
+	for end < len(s.owed) && s.owed[end].completion != 0 {
+		end++
+	}
+	if end == len(s.owed) {
+		return
+	}
+	for i := end - 1; i >= s.paid; i-- {
+		s.owed[i].undo(source.prepared, &s.statements)
+	}
+	s.paid = end + 1
+	s.settleOwed()
+}
+
+// settleOwed empties what is owed once it is all paid, so the next Sync reuses
+// the same space.
+func (s *session) settleOwed() {
+	if s.paid == len(s.owed) {
+		clear(s.owed)
+		s.owed, s.paid = s.owed[:0], 0
+	}
+}
+
+// clearOwed forgets what is owed, for a backend that is no longer this
+// session's.
+func (s *session) clearOwed() {
+	clear(s.owed)
+	s.owed, s.paid = s.owed[:0], 0
 }
 
 // pumpBackend reads the held backend and relays its replies to the client.
@@ -498,12 +585,9 @@ func (s *session) feedBackend(source *backend, data []byte) []byte {
 
 		// A completion for a Parse or Close this proxy injected is not the
 		// client's to see: it is counting replies to its own messages.
-		if len(s.expect) > 0 && s.expect[0] == kind {
+		if s.answered(kind) {
 			if !flush() {
 				return nil
-			}
-			if s.expect = s.expect[1:]; len(s.expect) == 0 {
-				s.expect = nil
 			}
 			step := min(total, len(data)-at)
 			at += step
@@ -523,6 +607,7 @@ func (s *session) feedBackend(source *backend, data []byte) []byte {
 			}
 
 			source.txStatus = status
+			s.synced(source)
 			if s.pending > 0 {
 				s.pending--
 			}
@@ -647,7 +732,7 @@ func (s *session) release() {
 	target, handle := s.backend, s.handle
 	s.backend = nil
 	s.handle = pooling.Handle[*backend]{}
-	s.expect = nil
+	s.clearOwed()
 
 	if target.sock.midMessage() {
 		target.fail()
@@ -676,7 +761,7 @@ func (s *session) release() {
 func (s *session) discard() {
 	target := s.backend
 	s.backend = nil
-	s.expect = nil
+	s.clearOwed()
 
 	target.sock.reset(s.worker)
 	target.sock.owner.Store(nil)
@@ -704,7 +789,7 @@ func (s *session) close() {
 		// between messages is recoverable, and release rolls that back.
 		// A cancellation still in flight is aimed at this backend, and
 		// must not find another client's query on it.
-		if s.pending > 0 || s.open || len(s.expect) > 0 || s.client.pass > 0 || s.cancels > 0 {
+		if s.pending > 0 || s.open || s.owes() || s.client.pass > 0 || s.cancels > 0 {
 			s.backend.fail()
 		}
 		s.release()
