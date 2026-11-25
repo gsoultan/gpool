@@ -21,7 +21,8 @@ const (
 // worker is one event-loop thread: it waits for sockets to become ready and then
 // moves bytes between them, never blocking on any one.
 //
-// The proxy runs one per core, all waiting on the same poller. A session is not
+// The proxy has one per core on the same poller, of which one is awake and the
+// rest are called in under load; see run. A session is not
 // tied to a worker — whichever worker the kernel hands an event to takes the
 // session's lock, advances it, and lets go — so the invariant that one goroutine
 // owns a connection holds one event at a time, with the goroutine shared by a few
@@ -30,9 +31,13 @@ const (
 // The cost of a connected client is therefore not a stack and a pair of buffers
 // but an entry in the kernel's interest list. This is the same shape as
 // PgBouncer, which is where the idea is proven — with the difference that there
-// are as many workers as cores, and PgBouncer is one.
+// are more workers to call on when one is not enough, and PgBouncer is one.
 type worker struct {
 	proxy *Proxy
+
+	// watch marks the one worker that sleeps in the kernel waiting for events.
+	// The rest are a reserve, parked until it falls behind.
+	watch bool
 
 	events [pollBatch]pollEvent
 
@@ -68,16 +73,36 @@ func newWorker(proxy *Proxy) *worker {
 }
 
 // run serves events until the proxy stops.
+//
+// One worker, the watch, sleeps in the kernel when there is nothing to do, and
+// at low load it is the only one that ever runs: it wakes, takes every socket
+// that became ready while it was busy, and serves them in one pass. The others
+// are a reserve. They are parked on a channel, cost nothing, and are called in
+// one at a time when the watch takes a full batch, which is the sign that events
+// are arriving faster than one thread drains them. A reserve worker goes back
+// to being parked the moment a poll comes back empty.
+//
+// Every worker waiting in the kernel at once was measured against this: at
+// eight clients it spent 34 µs of CPU a query where a single thread spends 24,
+// the difference being a thread woken for each event instead of one thread
+// finding several.
 func (w *worker) run() {
 	for !w.proxy.stopping.Load() {
-		n, err := w.proxy.poller.wait(w.events[:], len(w.resume) == 0)
+		n, err := w.proxy.poller.wait(w.events[:], w.watch && len(w.resume) == 0)
 		if err != nil {
 			return
+		}
+		if n == len(w.events) {
+			w.proxy.callReserve()
 		}
 		for i := range n {
 			w.dispatch(readiness(&w.events[i]))
 		}
 		w.runResumed()
+
+		if n == 0 && !w.watch && len(w.resume) == 0 {
+			w.proxy.park()
+		}
 	}
 }
 

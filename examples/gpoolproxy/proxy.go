@@ -77,6 +77,12 @@ type Proxy struct {
 	workers sync.WaitGroup
 	started bool
 
+	// reserve is how a parked worker is called in, parked counts the ones that
+	// could be, and halt releases them all when the proxy stops.
+	reserve chan struct{}
+	parked  atomic.Int32
+	halt    chan struct{}
+
 	// inbox carries work onto a worker from a goroutine that is not one: a
 	// handshake that finished with a query already in hand, a dial that
 	// completed. wakeR and wakeW are the pipe that gets a worker's attention.
@@ -262,10 +268,40 @@ func (p *Proxy) startWorkers() error {
 	p.poller, p.wakeR, p.wakeW = poller, pipe[0], pipe[1]
 	p.started = true
 
-	for range runtime.GOMAXPROCS(0) {
-		p.workers.Go(newWorker(p).run)
+	count := runtime.GOMAXPROCS(0)
+	p.reserve = make(chan struct{}, count)
+	p.halt = make(chan struct{})
+
+	for i := range count {
+		w := newWorker(p)
+		w.watch = i == 0
+		p.workers.Go(w.run)
 	}
 	return nil
+}
+
+// callReserve brings one parked worker in. It is called by a worker that took
+// as many events as it had room for, which means more are waiting behind them.
+func (p *Proxy) callReserve() {
+	if p.parked.Load() == 0 {
+		return
+	}
+	select {
+	case p.reserve <- struct{}{}:
+	default:
+	}
+}
+
+// park takes a reserve worker out of service until it is called for or the
+// proxy stops. A call that arrives just before the worker parks is not lost:
+// the channel holds it.
+func (p *Proxy) park() {
+	p.parked.Add(1)
+	select {
+	case <-p.reserve:
+	case <-p.halt:
+	}
+	p.parked.Add(-1)
 }
 
 // post runs work on a worker. It reports false once the proxy has shut its
@@ -727,6 +763,7 @@ func (p *Proxy) shutdown() {
 	p.inboxMu.Lock()
 	_, _ = syscall.Write(p.wakeW, []byte{0})
 	p.inboxMu.Unlock()
+	close(p.halt)
 	p.workers.Wait()
 
 	// With no workers left, this goroutine is the only one serving sessions and

@@ -29,10 +29,8 @@ type pollEvent = syscall.EpollEvent
 // write interest only while output is pending — costs a system call each way on
 // a path that otherwise makes four per query.
 //
-// It is one instance shared by all workers rather than one each. The kernel
-// wakes a single waiter per event, most recently parked first, so a quiet proxy
-// is served by one warm thread and a busy one by all of them, and a backend that
-// moves between clients never has to move between pollers.
+// It is one instance shared by all workers rather than one each, so a backend
+// that moves between clients never has to move between pollers.
 type poller struct {
 	fd int
 }

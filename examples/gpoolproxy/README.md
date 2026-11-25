@@ -60,12 +60,16 @@ not a buffer.
   goroutine, because they are a conversation with a deadline. Once the client is
   authenticated its socket is taken over as a raw non-blocking descriptor and the
   goroutine exits.
-- **One poller, a worker per CPU.** Every client and backend socket is registered
-  once, edge-triggered, with a single epoll instance. `GOMAXPROCS` workers block
-  in `epoll_wait`; whichever wakes takes the session's lock and moves bytes. No
-  socket is ever re-registered, which matters: moving a backend between per-worker
-  pollers was measured at 10% of CPU in `epoll_ctl` before the design settled on
-  one.
+- **One poller, one worker awake, the rest in reserve.** Every client and
+  backend socket is registered once, edge-triggered, with a single epoll
+  instance. One worker sleeps in `epoll_wait` and at low load is the only one
+  that runs: it wakes, takes every socket that became ready while it was busy,
+  and serves them in one pass. The other `GOMAXPROCS - 1` workers are parked
+  and are called in one at a time when a worker takes a full batch of events,
+  which is the sign that one thread is no longer keeping up. A reserve worker
+  parks again as soon as a poll comes back empty. No socket is ever
+  re-registered, which matters: moving a backend between per-worker pollers was
+  measured at 10% of CPU in `epoll_ctl` before the design settled on one.
 - **Bytes go from one socket to the other out of the worker's buffer.** Each
   worker owns one 64 KiB read buffer. What it reads from a client is written to
   the backend from that same buffer, and the reverse. A socket gets a buffer of
@@ -87,56 +91,63 @@ is no Windows poller, so the example no longer builds there.
 
 PgBouncer 1.22.0 and gpoolproxy as processes on one host, both in **transaction
 mode**, both pooling **16** server connections, both accepting 4,000 clients,
-both with a 512-statement prepared cache, against the same PostgreSQL 16.15 over
-loopback. Host: 4 vCPUs of a 2.1 GHz Xeon, **shared between PostgreSQL, the load
-generator and the proxy under test**. Median of three passes of 40,000 queries,
-the targets interleaved at each concurrency.
+both with a 512-statement prepared cache, against the same PostgreSQL 16.15
+(`wal_level=logical`) over loopback. Host: 4 vCPUs of a 2.1 GHz Xeon, **shared
+between PostgreSQL, the load generator and the proxy under test**. Median of
+three passes of 40,000 queries, the targets interleaved at each concurrency.
 
 Interleaving matters. Sweeping one target to completion before starting the next
 lets drift in the machine land on whichever target held the slot and be read as
 a difference between them — an earlier run of this benchmark reported PgBouncer
 at both 4,798 and 2,705 queries per second for the same case that way.
 
-"Before" is the previous gpoolproxy (two goroutines and 24 KiB of buffers per
-client), built from the commit before this design and run on the same machine in
-the same session. It was run in its own three passes rather than interleaved with
-the other two.
-
 Throughput, queries per second:
 
-| clients | direct | PgBouncer | before | gpoolproxy | vs PgBouncer | vs before |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 14,948 | 8,678 | 5,562 | 8,717 | 1.00× | 1.57× |
-| 8 | 118,904 | 42,168 | 32,219 | 31,949 | 0.76× | 0.99× |
-| 32 | 150,815 | 49,759 | 42,032 | 44,239 | 0.89× | 1.05× |
-| 128 | 117,891 | 43,089 | 42,682 | 47,781 | 1.11× | 1.12× |
-| 512 | *exceeds max_connections* | 41,452 | 46,165 | 47,843 | 1.15× | 1.04× |
-| 1024 | — | 34,297 | 43,730 | 49,088 | 1.43× | 1.12× |
-| 2048 | — | 29,764 | 39,941 | 45,439 | 1.53× | 1.14× |
-| 3000 | — | 29,387 | 38,564 | 45,158 | 1.54× | 1.17× |
+| clients | PgBouncer | gpoolproxy | ratio |
+| ---: | ---: | ---: | ---: |
+| 1 | 8,791 | 7,883 | 0.90× |
+| 8 | 37,790 | 35,918 | 0.95× |
+| 32 | 46,047 | 44,193 | 0.96× |
+| 128 | 42,188 | 44,440 | 1.05× |
+| 512 | 40,392 | 46,738 | 1.16× |
+| 1024 | 34,452 | 44,236 | 1.28× |
+| 2048 | 30,753 | 43,483 | 1.41× |
+| 3000 | 27,301 | 42,152 | 1.54× |
 
 CPU the proxy process spent per query, user plus system, microseconds:
 
-| clients | PgBouncer | before | gpoolproxy |
+| clients | PgBouncer | gpoolproxy | |
 | ---: | ---: | ---: | ---: |
-| 1 | 42.0 | 132.8 | 45.2 |
-| 8 | 21.0 | 36.8 | 34.2 |
-| 32 | 19.0 | 27.5 | 24.2 |
-| 128 | 22.5 | 29.2 | 23.2 |
-| 512 | 23.8 | 31.8 | 22.8 |
-| 1024 | 26.0 | 32.0 | 24.5 |
-| 2048 | 29.5 | 36.5 | 25.8 |
-| 3000 | 30.0 | 36.2 | 26.5 |
+| 1 | 40.8 | 46.0 | +13% |
+| 8 | 22.5 | 21.2 | −6% |
+| 32 | 19.2 | 20.0 | +4% |
+| 128 | 23.0 | 20.8 | −10% |
+| 512 | 23.5 | 21.2 | −10% |
+| 1024 | 26.8 | 22.5 | −16% |
+| 2048 | 29.2 | 23.8 | −19% |
+| 3000 | 32.8 | 25.8 | −21% |
+
+Differences under about 10% at 1, 8 and 32 clients are inside what this host
+repeats: the same PgBouncer case moved between 33,000 and 44,000 queries per
+second across runs an hour apart.
 
 Memory, resident, MiB:
 
-| | PgBouncer | before | gpoolproxy |
-| :--- | ---: | ---: | ---: |
-| just started, no clients | 3.6 | 8.1 | 8.6 |
-| 3,000 clients connected and idle | 9.0 | 105.7 | 15.1 |
-| per idle client | 1.9 KiB | 33 KiB | 2.2 KiB |
-| 3,000 clients querying, end of the sweep | 21.5 | 154.9 | 26.8 |
-| threads after that sweep | 2 | *not measured* | 19 to 38 |
+| | PgBouncer | gpoolproxy |
+| :--- | ---: | ---: |
+| just started, no clients | 3.6 | 8.6 |
+| of which private (not the binary's own pages) | 1.0 | 1.6 |
+| 3,000 clients connected and idle | 9.0 | 15.1 |
+| per idle client | 1.9 KiB | 2.2 KiB |
+| 3,000 clients querying, first sweep | 21.6 | 24.1 |
+| the same after three sweeps | 21.6 | 29.4 |
+| threads after that | 2 | 12 |
+
+Against the previous gpoolproxy (two goroutines and 24 KiB of buffers per
+client), built from the commit before this design and measured on the same
+machine: resident memory with 3,000 querying clients was 154.9 MiB, an idle
+client cost 33 KiB, CPU per query was 132.8 µs at one client and 36.2 µs at
+3,000, and one client got 5,562 queries per second.
 
 Storage: the gpoolproxy binary is 10.1 MB, or 6.9 MB built with
 `-ldflags="-s -w" -trimpath`, and needs nothing else on disk. The PgBouncer
@@ -145,22 +156,31 @@ which a host usually has already.
 
 What those tables say, without rounding in anyone's favour:
 
-**Memory under load fell 83% and is now PgBouncer's, give or take a quarter.**
-155 MiB to 27 at three thousand querying clients, against PgBouncer's 21.5. An
-idle client went from 33 KiB to 2.2 KiB, against 1.9 KiB.
+**Memory under load fell by about 83% and is now within a third of
+PgBouncer's.** 155 MiB to between 24 and 29 at three thousand querying clients,
+against PgBouncer's 21.6. An idle client went from 33 KiB to 2.2 KiB, against
+1.9 KiB.
 
 **The floor is the Go runtime, and it is higher than PgBouncer's.** An empty
-gpoolproxy is 8.6 MiB resident, of which about 7 MiB is the binary's own text
-mapped from disk. PgBouncer starts at 3.6 MiB. At small client counts PgBouncer
-is the lighter process and will stay so.
+gpoolproxy is 8.6 MiB resident. About 7 MiB of that is the binary's own text
+mapped from disk, which the kernel can drop and reread; what the process
+privately owns is 1.6 MiB against PgBouncer's 1.0. At small client counts
+PgBouncer is the lighter process and will stay so.
 
-**CPU per query is now level with PgBouncer from 128 clients up, and a little
-under it from 512.** Below that it is still higher — 34 µs against 21 at eight
-clients — because four workers woken one event at a time pay for context
-switches that one thread, already awake and draining several events per
-`epoll_wait`, does not. Running the proxy with `GOMAXPROCS=2` on this host
-brought the eight-client case to parity on both throughput and CPU and cost
-throughput at 3,000, so it is a trade rather than a fix.
+**CPU per query is level with PgBouncer from 8 clients and lower from 128.**
+That is what keeping a single worker awake bought. With every worker waiting in
+the kernel, eight clients cost 34 µs a query against PgBouncer's 21, because a
+thread was woken for each event where one thread, already awake, would have
+found several. With one worker awake it is 21.
+
+**At one client it is still about an eighth higher, and the cause is the Go
+runtime, not the proxy's own code.** The worker thread spends 42.5 µs a query,
+which is PgBouncer's figure. The rest is the runtime's monitor thread, which
+wakes a few thousand times a second for as long as any thread is in a system
+call: 240 ms of the 1,940 ms a 40,000-query run cost. Two ways around it were
+tried and measured. Parking the worker in the runtime's own poller instead of
+in `epoll_wait` took CPU at one client from 44 µs to 76. Spinning briefly before
+sleeping doubled it. Neither is in the code.
 
 **Neither proxy can make the kernel cheaper.** A query through either is six
 socket calls: read and write on the way in, read and write on the way back, and
@@ -168,13 +188,22 @@ two waits. Profiled, 71–81% of gpoolproxy's CPU is inside those calls. That is
 the reason there is no version of this that uses a fifth of PgBouncer's CPU:
 PgBouncer is already near the floor, and the floor is the same for both.
 
-**Throughput is ahead only where PgBouncer's one thread runs out.** Level at one
-client, behind at 8 and 32, ahead from 128, and 1.5× at 2,000 and beyond. The
-advantage is a second core, exactly as before; what changed is that it no longer
-costs seven times the memory. On a host with more cores than this one the gap
-is wider — the previous version of this table, from a 7-CPU machine, had
-gpoolproxy at 1.9× — but that is a statement about those cores, and these
-numbers are the ones measured for this code.
+**Throughput is ahead only where PgBouncer's one thread runs out.** Within a
+tenth of it up to 32 clients, ahead from 128, and 1.5× at 3,000. The advantage
+is a second core; what changed is that it no longer costs seven times the
+memory, and that the extra cores are not touched until they are needed. On a
+host with more cores than this one the gap is wider — the previous version of
+this table, from a 7-CPU machine, had gpoolproxy at 1.9× — but that is a
+statement about those cores, and these numbers are the ones measured for this
+code.
+
+**The binary is where pgx shows.** Of the 6.9 MB stripped, about 2.2 MB is
+`pgconn` and what it brings (`pgtype`, `database/sql`, `encoding/json`,
+`golang.org/x/text`), used once per server connection for the upstream
+handshake. A build with only `crypto/tls` and `net` is 4.7 MB, so that is the
+floor for a Go proxy that offers TLS. Getting there means a second, hand-written
+copy of the upstream handshake — SCRAM, TLS modes, connection-string parsing —
+and it has not been done.
 
 **PgBouncer's own answer to the single core is `so_reuseport`** — several
 PgBouncer processes behind one port. That works, and it means each has its own

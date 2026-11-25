@@ -664,21 +664,23 @@ database and the load generator, median of three interleaved passes:
 
 | clients | PgBouncer q/s | gpoolproxy q/s | PgBouncer CPU/query | gpoolproxy CPU/query |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 8,678 | 8,717 | 42.0 µs | 45.2 µs |
-| 8 | **42,168** | 31,949 | **21.0 µs** | 34.2 µs |
-| 32 | **49,759** | 44,239 | **19.0 µs** | 24.2 µs |
-| 128 | 43,089 | **47,781** | 22.5 µs | 23.2 µs |
-| 1024 | 34,297 | **49,088** | 26.0 µs | 24.5 µs |
-| 3000 | 29,387 | **45,158** | 30.0 µs | 26.5 µs |
+| 1 | 8,791 | 7,883 | 40.8 µs | 46.0 µs |
+| 8 | 37,790 | 35,918 | 22.5 µs | 21.2 µs |
+| 32 | 46,047 | 44,193 | 19.2 µs | 20.0 µs |
+| 128 | 42,188 | **44,440** | 23.0 µs | **20.8 µs** |
+| 1024 | 34,452 | **44,236** | 26.8 µs | **22.5 µs** |
+| 3000 | 27,301 | **42,152** | 32.8 µs | **25.8 µs** |
 
-With 3,000 clients querying, PgBouncer is 21.5 MiB resident and gpoolproxy 26.8;
-an idle client costs 1.9 KiB in one and 2.2 KiB in the other. PgBouncer is the
-lighter process when nearly empty (3.6 MiB against 8.6, most of it the Go
-binary's own text) and the cheaper one at low concurrency. gpoolproxy pulls ahead
-once PgBouncer's single thread is the limit, because it can use a second core.
-Both spend most of their CPU in the same six socket calls per query, which is why
-neither is several times cheaper than the other. See
-`examples/gpoolproxy/README.md` for the method, the design, and the caveats.
+With 3,000 clients querying, PgBouncer is 21.6 MiB resident and gpoolproxy 24 to
+29; an idle client costs 1.9 KiB in one and 2.2 KiB in the other. PgBouncer is
+the lighter process when nearly empty (3.6 MiB against 8.6, most of it the Go
+binary's own text) and a little cheaper at one client. From eight clients the
+two cost the same CPU per query, because gpoolproxy keeps a single worker awake
+until one is not enough, and past a hundred it is cheaper and faster, because
+then it can use a second core. Both spend most of their CPU in the same six
+socket calls per query, which is why neither is several times cheaper than the
+other. See `examples/gpoolproxy/README.md` for the method, the design, and the
+caveats.
 
 ## 🐬 MySQL and MariaDB
 

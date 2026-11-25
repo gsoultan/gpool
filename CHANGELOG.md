@@ -54,14 +54,21 @@ reason and the migration.
   worker owns, and a session with no backend waits in a FIFO queue that a
   releasing session hands its backend to directly.
 
+  One worker is awake at a time unless it falls behind. The rest are parked and
+  called in one by one when a worker takes a full batch of events, so a lightly
+  loaded proxy is one warm thread finding several events per wake rather than
+  several threads woken for one each. That alone took CPU per query at eight
+  clients from 34 µs to 21.
+
   Measured on one 4-vCPU host against PgBouncer 1.22.0 at matched pool size:
-  resident memory with 3,000 querying clients fell from 155 MiB to 27 (PgBouncer
-  21.5), an idle client from 33 KiB to 2.2 KiB (PgBouncer 1.9), and CPU per query
-  at 3,000 clients from 36 µs to 26.5 (PgBouncer 30). Throughput is level with
-  PgBouncer at one client, behind it at 8 and 32, and ahead from 128, reaching
-  1.5× at 2,000 and above. It is not several times faster or lighter than
-  PgBouncer and the README says why: both spend most of their CPU in the same
-  six socket calls per query.
+  resident memory with 3,000 querying clients fell from 155 MiB to between 24
+  and 29 (PgBouncer 21.6), an idle client from 33 KiB to 2.2 KiB (PgBouncer
+  1.9), and CPU per query at 3,000 clients from 36 µs to 25.8 (PgBouncer 32.8).
+  CPU per query is level with PgBouncer from 8 clients, 10 to 21% lower from
+  128, and 13% higher at one. Throughput is within a tenth of PgBouncer up to 32
+  clients and ahead from 128, reaching 1.5× at 3,000. It is not several times
+  faster or lighter than PgBouncer and the README says why: both spend most of
+  their CPU in the same six socket calls per query.
 
   Linux is tested. The kqueue poller compiles but has not been run, and the
   example no longer builds on Windows.

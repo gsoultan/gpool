@@ -22,8 +22,10 @@ assumption.
 An event loop, not goroutines. After the handshake (a goroutine, because TLS and
 SCRAM are a conversation with a deadline) the client socket is taken over as a
 raw non-blocking descriptor. One shared edge-triggered epoll instance holds every
-client and backend socket; `GOMAXPROCS` workers block in `epoll_wait`, and
-whichever wakes takes `session.mu` and advances that session. A client costs a
+client and backend socket. One worker (the watch) sleeps in `epoll_wait`; the
+other `GOMAXPROCS - 1` are parked on a channel and called in one at a time when
+a worker takes a full batch, then park again on an empty poll. Whichever worker
+gets an event takes `session.mu` and advances that session. A client costs a
 descriptor and about a kilobyte.
 
 Do not go back to a poller per worker: a backend then has to be re-registered
@@ -113,20 +115,32 @@ nothing, so the headroom was pure resident memory.
 
 4 vCPUs shared by PostgreSQL 16, the generator and the proxy; transaction mode,
 pool 16 both sides; median of three interleaved passes. Queries per second,
-PgBouncer → gpoolproxy: 8,678 → 8,717 at 1 client, 42,168 → 31,949 at 8,
-49,759 → 44,239 at 32, 43,089 → 47,781 at 128, 34,297 → 49,088 at 1,024,
-29,387 → 45,158 at 3,000. CPU per query: 21 → 34 µs at 8, level from 128,
-30 → 26.5 µs at 3,000. Resident at 3,000 querying: 21.5 → 26.8 MiB. Empty:
-3.6 → 8.6 MiB, about 7 of it binary text.
+PgBouncer → gpoolproxy: 8,791 → 7,883 at 1 client, 37,790 → 35,918 at 8,
+46,047 → 44,193 at 32, 42,188 → 44,440 at 128, 34,452 → 44,236 at 1,024,
+27,301 → 42,152 at 3,000. CPU per query: 40.8 → 46.0 µs at 1, 22.5 → 21.2 at 8,
+19.2 → 20.0 at 32, 32.8 → 25.8 at 3,000. Resident at 3,000 querying: 21.6 → 24
+to 29 MiB. Empty: 3.6 → 8.6 MiB, about 7 of it binary text (private 1.0 → 1.6).
+Anything under 10% at low client counts is inside this host's run-to-run noise.
 
 **An "80% faster, 80% lighter than PgBouncer" target was asked for and is not
 reachable**, and the reason is durable: both proxies do the same six socket calls
 per query and 71–81% of the proxy's CPU is inside them. PgBouncer is near that
 floor already. The throughput lead exists only where PgBouncer's one thread
-saturates, and grows with cores. At low concurrency a single hot thread beats
-several woken one event at a time; `GOMAXPROCS=2` reached parity at 8 clients
-here and cost throughput at 3,000. A busy-poll before sleeping was tried and
-doubled CPU at one client for no throughput.
+saturates, and grows with cores.
+
+**Keep one worker awake.** With every worker blocked in `epoll_wait`, 8 clients
+cost 34 µs/query against PgBouncer's 21: a thread woken per event instead of one
+thread finding several. With the reserve parked it is 21.
+
+**The one-client gap is the Go runtime's monitor thread**, about 6 µs/query
+(240 ms of a 1,940 ms run); the worker thread itself matches PgBouncer. Tried
+and rejected, with numbers: parking the watch in the runtime netpoller via the
+epoll fd (44 → 76 µs at one client), a busy-poll before sleeping (doubled CPU),
+`LockOSThread` on workers (no difference outside noise).
+
+**Binary:** 6.9 MB stripped, of which about 2.2 MB is `pgconn` and what it pulls
+in; a TLS-and-net-only Go binary is 4.7 MB. Dropping pgconn means hand-writing
+the upstream handshake, not done.
 
 **Interleave the targets at each concurrency; do not sweep one to completion.**
 Sweeping lets machine drift land on whichever target held the slot and be read as
