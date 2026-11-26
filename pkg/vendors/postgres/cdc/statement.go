@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/gsoultan/caduceus"
 	"github.com/gsoultan/caduceus/wire"
 )
 
@@ -23,26 +24,26 @@ const slotConfirmedSQL = `SELECT confirmed_flush_lsn::text FROM pg_replication_s
 
 func createPublicationSQL(name string, tables []string) string {
 	return fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s",
-		quoteIdentifier(name), quoteQualifiedNames(tables))
+		caduceus.QuoteIdentifier(name), quoteQualifiedNames(tables))
 }
 
 func setPublicationTablesSQL(name string, tables []string) string {
 	return fmt.Sprintf("ALTER PUBLICATION %s SET TABLE %s",
-		quoteIdentifier(name), quoteQualifiedNames(tables))
+		caduceus.QuoteIdentifier(name), quoteQualifiedNames(tables))
 }
 
 func addPublicationTablesSQL(name string, tables []string) string {
 	return fmt.Sprintf("ALTER PUBLICATION %s ADD TABLE %s",
-		quoteIdentifier(name), quoteQualifiedNames(tables))
+		caduceus.QuoteIdentifier(name), quoteQualifiedNames(tables))
 }
 
 func dropPublicationTablesSQL(name string, tables []string) string {
 	return fmt.Sprintf("ALTER PUBLICATION %s DROP TABLE %s",
-		quoteIdentifier(name), quoteQualifiedNames(tables))
+		caduceus.QuoteIdentifier(name), quoteQualifiedNames(tables))
 }
 
 func dropPublicationSQL(name string) string {
-	return fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", quoteIdentifier(name))
+	return fmt.Sprintf("DROP PUBLICATION IF EXISTS %s", caduceus.QuoteIdentifier(name))
 }
 
 // exec runs a statement that returns no rows, draining the result either way.

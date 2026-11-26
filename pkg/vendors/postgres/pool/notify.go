@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/gsoultan/caduceus"
 	"github.com/gsoultan/gpool/pkg/gpool"
 )
 
@@ -32,7 +33,7 @@ func (c *connWrapper) Listen(ctx context.Context, channel string) error {
 	// where missing one is not.
 	c.conn().listening = true
 
-	if _, err := c.conn().session.exec(ctx, "LISTEN "+quoteIdentifier(channel), nil); err != nil {
+	if _, err := c.conn().session.exec(ctx, "LISTEN "+caduceus.QuoteIdentifier(channel), nil); err != nil {
 		return fmt.Errorf("gpool/postgres: listen on %q: %w", channel, err)
 	}
 	return nil
@@ -46,7 +47,7 @@ func (c *connWrapper) Unlisten(ctx context.Context, channel string) error {
 
 	statement := unlistenAll
 	if channel != "" {
-		statement = "UNLISTEN " + quoteIdentifier(channel)
+		statement = "UNLISTEN " + caduceus.QuoteIdentifier(channel)
 	}
 
 	if _, err := c.conn().session.exec(ctx, statement, nil); err != nil {
@@ -96,18 +97,4 @@ func (c *connWrapper) WaitForNotification(ctx context.Context) (gpool.Notificati
 		Payload: notification.Payload,
 		PID:     notification.PID,
 	}, nil
-}
-
-// quoteIdentifier renders s as a quoted SQL identifier. LISTEN and UNLISTEN take a
-// bare channel name rather than a parameter, so the name has to be quoted here.
-func quoteIdentifier(s string) string {
-	quoted := make([]byte, 0, len(s)+2)
-	quoted = append(quoted, '"')
-	for i := range len(s) {
-		if s[i] == '"' {
-			quoted = append(quoted, '"')
-		}
-		quoted = append(quoted, s[i])
-	}
-	return string(append(quoted, '"'))
 }

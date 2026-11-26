@@ -193,7 +193,7 @@ func (p *Postgres) startReplication(ctx context.Context, conn *wire.Conn, start 
 	// The slot name is interpolated bare, as the replication grammar requires;
 	// it was checked against slotNamePattern when the config was validated.
 	command := fmt.Sprintf("START_REPLICATION SLOT %s LOGICAL %s (proto_version '%d', publication_names %s)",
-		p.config.SlotName, formatLSN(start), protoVersion, quoteLiteral(p.config.PublicationName))
+		p.config.SlotName, formatLSN(start), protoVersion, replicationLiteral(p.config.PublicationName))
 
 	if err := conn.StartCopyBoth(ctx, command); err != nil {
 		return fmt.Errorf("gpool/postgres/cdc: starting replication on slot %q: %w", p.config.SlotName, err)

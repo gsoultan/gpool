@@ -11,31 +11,6 @@ import (
 	"github.com/gsoultan/caduceus/wire"
 )
 
-func TestQuoteIdentifier(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{name: "plain", input: "users", want: `"users"`},
-		{name: "mixed case is preserved", input: "Users", want: `"Users"`},
-		{name: "embedded quote is doubled", input: `we"ird`, want: `"we""ird"`},
-		{name: "injection attempt is neutralised", input: `x"; DROP TABLE y; --`, want: `"x""; DROP TABLE y; --"`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := quoteIdentifier(tt.input); got != tt.want {
-				t.Fatalf("quoteIdentifier(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 // Quoting "public.users" as a single identifier names a table literally called
 // "public.users" rather than users in schema public, so the parts must be split.
 func TestQuoteQualifiedName(t *testing.T) {
@@ -91,8 +66,10 @@ func TestSplitQualifiedName(t *testing.T) {
 }
 
 // Plugin arguments are interpolated into START_REPLICATION, so a quote in a
-// publication name must not be able to close the literal.
-func TestQuoteLiteral(t *testing.T) {
+// publication name must not be able to close the literal. A backslash stays
+// as it is: written as E'...', as SQL's quoting writes it, the walsender
+// refuses the whole command with a syntax error.
+func TestReplicationLiteral(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -102,14 +79,15 @@ func TestQuoteLiteral(t *testing.T) {
 		{input: "pub", want: `'pub'`},
 		{input: "it's", want: `'it''s'`},
 		{input: `a', injected '`, want: `'a'', injected '''`},
+		{input: `back\slash`, want: `'back\slash'`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			t.Parallel()
 
-			if got := quoteLiteral(tt.input); got != tt.want {
-				t.Fatalf("quoteLiteral(%q) = %q, want %q", tt.input, got, tt.want)
+			if got := replicationLiteral(tt.input); got != tt.want {
+				t.Fatalf("replicationLiteral(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/gsoultan/caduceus"
 	"github.com/gsoultan/caduceus/wire"
 )
 
@@ -18,11 +19,6 @@ const (
 	codeUndefinedTable  = "42P01"
 )
 
-// quoteIdentifier renders s as a single quoted SQL identifier.
-func quoteIdentifier(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
-
 // quoteQualifiedName renders a possibly schema-qualified table name.
 //
 // Quoting "public.users" as one identifier would name a table literally called
@@ -32,9 +28,9 @@ func quoteIdentifier(s string) string {
 func quoteQualifiedName(s string) string {
 	schema, table := splitQualifiedName(s)
 	if schema == "" {
-		return quoteIdentifier(table)
+		return caduceus.QuoteIdentifier(table)
 	}
-	return quoteIdentifier(schema) + "." + quoteIdentifier(table)
+	return caduceus.QuoteIdentifier(schema) + "." + caduceus.QuoteIdentifier(table)
 }
 
 // splitQualifiedName splits "schema.table" into its parts. An unqualified name
@@ -56,8 +52,12 @@ func quoteQualifiedNames(tables []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// quoteLiteral renders s as a SQL string literal.
-func quoteLiteral(s string) string {
+// replicationLiteral renders s as a string literal of the replication
+// command grammar, for START_REPLICATION's plugin options. It is not
+// caduceus.QuoteLiteral: that writes a string with a backslash as E'...',
+// which SQL accepts and the walsender's grammar refuses with a syntax error.
+// That grammar reads a backslash literally, so only the quote is doubled.
+func replicationLiteral(s string) string {
 	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
 }
 
