@@ -252,9 +252,10 @@ pool. What it covers:
   `verify-ca`, `verify-full`, with `sslrootcert`, `sslcert` and `sslkey`. `allow` connects in
   plaintext and, unlike libpq, does not retry with TLS.
 - **Authentication**: SCRAM-SHA-256 (the server's signature is verified), MD5, and cleartext.
-- **Protocol 3.2** with PostgreSQL 18 and later, and 3.0 with an older server or a pooler that
-  refuses 3.2, which is asked again for 3.0 once per pool. `min_protocol_version` and
-  `max_protocol_version` in the connection string bound it, as in libpq 18.
+- **Protocol 3.2** with PostgreSQL 18 and later, and 3.0 with an older server, which offers it.
+  Something in front of the server that refuses 3.2 outright, as PgBouncer before 1.24 does,
+  fails with `ErrProtocolVersion`; set `max_protocol_version=3.0` for it. `min_protocol_version`
+  and `max_protocol_version` in the connection string bound it, as in libpq 18.
 - **Cancellation**: a context that ends mid-query sends a CancelRequest and closes the connection,
   so the pool never reuses one whose state is unknown. `errors.Is(err, context.DeadlineExceeded)`
   holds.

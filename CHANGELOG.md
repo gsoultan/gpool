@@ -228,8 +228,9 @@ reason and the migration.
   3.2's cancel key is up to 256 bytes where 3.0's is 4. An older server
   answers that it speaks 3.0, and the connection carries on in 3.0. A pooler
   that refuses 3.2 outright, as PgBouncer before 1.24 does with "bad packet
-  header", is asked again for 3.0, and the pool's later connections ask for
-  3.0 at once. `min_protocol_version` and `max_protocol_version` (`3.0`,
+  header", fails the dial with `ErrProtocolVersion`, naming
+  `max_protocol_version=3.0`; the driver does not dial again, since gpool is
+  what replaces such a pooler. `min_protocol_version` and `max_protocol_version` (`3.0`,
   `3.2`, `latest`) bound it, as in libpq 18. `examples/gpoolproxy` offers 3.0
   to a client asking for 3.2, as a server older than 18 does.
 
