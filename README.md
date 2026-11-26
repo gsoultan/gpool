@@ -246,8 +246,11 @@ outside the standard library, so gpool's `go.mod` requires caduceus and nothing 
 pglogrepl. caduceus is usable on its own, for an application that wants one connection without a
 pool. What it covers:
 
-- **Connection strings** as libpq reads them for a single host: URL or keyword/value form, the `PG*`
+- **Connection strings** as libpq reads them: URL or keyword/value form, the `PG*`
   environment variables (`PGHOST`, `PGPASSWORD`, `PGSSLMODE`, …), and the password file.
+  Several hosts (`host=a,b port=5432,5433`) are tried in order for each new connection, and
+  `target_session_attrs` (`read-write`, `primary`, `standby`, `prefer-standby`, `read-only`)
+  picks the server, so after a failover the pool's next connections go to the new primary.
 - **TLS** by `sslmode`: `disable`, `prefer` (falls back to plaintext, as libpq does), `require`,
   `verify-ca`, `verify-full`, with `sslrootcert`, `sslcert` and `sslkey`. `allow` connects in
   plaintext and, unlike libpq, does not retry with TLS.
