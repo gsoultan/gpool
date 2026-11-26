@@ -2,7 +2,10 @@
 
 package pool
 
-import "github.com/gsoultan/caduceus/wire"
+import (
+	"github.com/gsoultan/caduceus"
+	"github.com/gsoultan/caduceus/wire"
+)
 
 // resultSet is what Rows and Row are built over: a cursor on a live
 // connection, or a scripted one in tests.
@@ -13,5 +16,5 @@ type resultSet interface {
 	Close()
 	Fields() []wire.Field
 	RawValues() [][]byte
-	Tag() string
+	Tag() caduceus.CommandTag
 }

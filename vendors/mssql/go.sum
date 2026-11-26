@@ -20,8 +20,8 @@ github.com/golang-sql/sqlexp v0.1.0 h1:ZCD6MBpcuOVfGVqsEmY5/4FtYiKz6tSyUv9LPEDei
 github.com/golang-sql/sqlexp v0.1.0/go.mod h1:J4ad9Vo8ZCWQ2GMrC4UCQy1JpCbwU9m3EOqtpKwwwHI=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/gsoultan/caduceus v0.0.0-20261126021419-c146861c4c26 h1:aoN7MVP/boIcX4Cxd01JeQrSZIRRvY9VImzxZl01ut4=
-github.com/gsoultan/caduceus v0.0.0-20261126021419-c146861c4c26/go.mod h1:jAqkCGp1iYJOz23BfgFjqfbXa39/n1L3coyoSOLp3Ho=
+github.com/gsoultan/caduceus v0.0.0-20261126023755-ce2475d0f1f1 h1:ACoXY1AY0Dg0GIvWfombWK69/RGLpMGa3IM25yY7+Fk=
+github.com/gsoultan/caduceus v0.0.0-20261126023755-ce2475d0f1f1/go.mod h1:jAqkCGp1iYJOz23BfgFjqfbXa39/n1L3coyoSOLp3Ho=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/microsoft/go-mssqldb v1.10.0 h1:pHEt+Qz6YFPWqREq10mqSE524QQo+/QremwTCQht7TY=

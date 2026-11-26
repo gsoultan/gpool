@@ -43,7 +43,7 @@ func (s *session) busy() bool { return s.db.Busy() }
 
 func (s *session) forgetStatements() { s.db.ForgetStatements() }
 
-func (s *session) exec(ctx context.Context, sql string, args []any) (string, error) {
+func (s *session) exec(ctx context.Context, sql string, args []any) (caduceus.CommandTag, error) {
 	args, err := bindable(args)
 	if err != nil {
 		return "", err

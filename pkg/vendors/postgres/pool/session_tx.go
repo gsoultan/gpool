@@ -30,7 +30,7 @@ func (t sessionTx) Rollback(ctx context.Context) error {
 	return inOurWords(t.tx.Rollback(ctx))
 }
 
-func (t sessionTx) Exec(ctx context.Context, sql string, args []any) (string, error) {
+func (t sessionTx) Exec(ctx context.Context, sql string, args []any) (caduceus.CommandTag, error) {
 	args, err := bindable(args)
 	if err != nil {
 		return "", err

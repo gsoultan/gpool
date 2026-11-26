@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/gsoultan/caduceus"
 	"github.com/gsoultan/caduceus/wire"
 )
 
@@ -23,12 +24,12 @@ type fakeRows struct {
 
 var _ resultSet = (*fakeRows)(nil)
 
-func (r *fakeRows) Close()               { r.closes.Add(1) }
-func (r *fakeRows) Err() error           { return r.err }
-func (r *fakeRows) Next() bool           { return r.advance() }
-func (r *fakeRows) Tag() string          { return r.tag }
-func (r *fakeRows) Fields() []wire.Field { return r.fields }
-func (r *fakeRows) RawValues() [][]byte  { return r.raw }
+func (r *fakeRows) Close()                   { r.closes.Add(1) }
+func (r *fakeRows) Err() error               { return r.err }
+func (r *fakeRows) Next() bool               { return r.advance() }
+func (r *fakeRows) Tag() caduceus.CommandTag { return caduceus.CommandTag(r.tag) }
+func (r *fakeRows) Fields() []wire.Field     { return r.fields }
+func (r *fakeRows) RawValues() [][]byte      { return r.raw }
 
 func (r *fakeRows) advance() bool {
 	if r.remaining <= 0 {
@@ -64,7 +65,7 @@ func (t *fakeTx) Rollback(context.Context) error {
 	return t.err
 }
 
-func (t *fakeTx) Exec(context.Context, string, []any) (string, error) {
+func (t *fakeTx) Exec(context.Context, string, []any) (caduceus.CommandTag, error) {
 	t.statements.Add(1)
 	return "", t.err
 }

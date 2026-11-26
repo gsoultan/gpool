@@ -87,7 +87,7 @@ func (r *pgRows) RawValues() [][]byte {
 
 // CommandTag returns the command tag, which is only populated once the rows are closed.
 func (r *pgRows) CommandTag() string {
-	return r.rows.Tag()
+	return r.rows.Tag().String()
 }
 
 // All iterates the result set, closing it when iteration ends by any path.
