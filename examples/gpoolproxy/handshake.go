@@ -16,6 +16,9 @@ import (
 // Startup-phase packets carry a version code instead of a message type.
 const (
 	protocolVersion30 = 196608
+	// protocolVersion32 is PostgreSQL 18's, which differs from 3.0 only in a
+	// longer cancel key. The proxy offers 3.0 in its place.
+	protocolVersion32 = protocolVersion30 | 2
 	sslRequestCode    = 80877103
 	cancelRequestCode = 80877102
 	gssEncRequestCode = 80877104
@@ -137,7 +140,16 @@ func (s *handshake) startup() error {
 			}
 			s.proxy.cancel(binary.BigEndian.Uint32(body), string(body[4:]))
 			return errHandled
-		case protocolVersion30:
+		case protocolVersion30, protocolVersion32:
+			// A client asking for a newer minor version, as one does for
+			// PostgreSQL 18's 3.2, is told the proxy speaks 3.0, which is what
+			// a server older than 18 answers. Refusing the packet instead, as
+			// PgBouncer before 1.24 does, costs such a client a second dial.
+			if code != protocolVersion30 {
+				if err := s.send(negotiateProtocolVersion(body)); err != nil {
+					return err
+				}
+			}
 			if err := s.authenticate(parameterOf(body, "user")); err != nil {
 				return err
 			}
@@ -367,4 +379,31 @@ func cutCString(body []byte) (value string, rest []byte, ok bool) {
 		return "", body, false
 	}
 	return string(body[:end]), body[end+1:], true
+}
+
+// negotiateProtocolVersion is the NegotiateProtocolVersion that offers 3.0,
+// naming the protocol options in a startup packet's body (those whose names
+// begin "_pq_."), none of which the proxy recognises.
+func negotiateProtocolVersion(body []byte) []byte {
+	var options []string
+	for {
+		key, rest, ok := cutCString(body)
+		if !ok || key == "" {
+			break
+		}
+		if strings.HasPrefix(key, "_pq_.") {
+			options = append(options, key)
+		}
+		if _, body, ok = cutCString(rest); !ok {
+			break
+		}
+	}
+	message := []byte{msgNegotiateProtocolVersion, 0, 0, 0, 0}
+	message = binary.BigEndian.AppendUint32(message, 0)
+	message = binary.BigEndian.AppendUint32(message, uint32(len(options)))
+	for _, option := range options {
+		message = append(append(message, option...), 0)
+	}
+	binary.BigEndian.PutUint32(message[1:], uint32(len(message)-1))
+	return message
 }

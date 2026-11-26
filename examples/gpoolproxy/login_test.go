@@ -118,7 +118,7 @@ func TestLoginStartupPacketNamesUserDatabaseAndSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseUpstream() = %v", err)
 	}
-	packet := (&login{target: target}).startupMessage([][2]string{{"replication", "database"}})
+	packet := (&login{target: target, version: protocolVersion30}).startupMessage([][2]string{{"replication", "database"}})
 
 	if got := int(binary.BigEndian.Uint32(packet)); got != len(packet) {
 		t.Errorf("length field = %d, packet is %d bytes", got, len(packet))

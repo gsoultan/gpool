@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -593,5 +594,30 @@ func TestProxyReportsServerParametersToItsFirstClient(t *testing.T) {
 	}
 	if answer, _ := single(rows); answer != "1" {
 		t.Errorf("answer = %q, want 1", answer)
+	}
+}
+
+// A client asking for protocol 3.2, as one does for PostgreSQL 18, is offered
+// 3.0 the way a server older than 18 offers it, with the protocol options it
+// sent named as not recognised, and then logs in. The proxy used to refuse the
+// packet outright, which cost such a client a second dial.
+func TestProxyOffers30ToAClientAsking32(t *testing.T) {
+	url := startProxy(t, pooling.Config{MaxConns: 1})
+	target, err := parseUpstream(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := target.connectAsking(t.Context(), protocolVersion32, [2]string{"_pq_.something", "on"})
+	if err != nil {
+		t.Fatalf("logging in asking for 3.2 = %v", err)
+	}
+	defer session.conn.Close()
+	want := []byte{0, 0, 0, 0, 0, 0, 0, 1}
+	want = append(want, "_pq_.something\x00"...)
+	if !bytes.Equal(session.offered, want) {
+		t.Fatalf("NegotiateProtocolVersion = %q, want 3.0 and the option named", session.offered)
+	}
+	if len(session.secret) != 4 {
+		t.Fatalf("a %d-byte cancel key in protocol 3.0", len(session.secret))
 	}
 }

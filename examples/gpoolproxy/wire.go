@@ -21,6 +21,10 @@ const (
 	msgBackendKeyData  = 'K'
 	msgErrorResponse   = 'E'
 	msgPassword        = 'p'
+
+	// msgNegotiateProtocolVersion offers an older minor version than a
+	// startup packet asked for.
+	msgNegotiateProtocolVersion = 'v'
 )
 
 const scramMechanism = "SCRAM-SHA-256"

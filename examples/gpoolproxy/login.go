@@ -52,11 +52,21 @@ type login struct {
 	pid      uint32
 	secret   []byte
 	statuses map[string]string
+
+	// version is the protocol version the startup packet asks for, and
+	// offered the NegotiateProtocolVersion the server answered with, if any.
+	version uint32
+	offered []byte
 }
 
 // connect dials the server and logs in. extra is settings for this connection
 // alone, on top of the ones in the connection string.
 func (u *upstream) connect(ctx context.Context, extra ...[2]string) (*login, error) {
+	return u.connectAsking(ctx, protocolVersion30, extra...)
+}
+
+// connectAsking is connect with the protocol version to ask for.
+func (u *upstream) connectAsking(ctx context.Context, version uint32, extra ...[2]string) (*login, error) {
 	if u.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, u.timeout)
@@ -73,7 +83,7 @@ func (u *upstream) connect(ctx context.Context, extra ...[2]string) (*login, err
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
 
-	l := &login{target: u, conn: conn, statuses: map[string]string{}}
+	l := &login{target: u, conn: conn, statuses: map[string]string{}, version: version}
 	if err := l.run(ctx, extra); err != nil {
 		_ = l.conn.Close()
 		return nil, err
@@ -144,7 +154,7 @@ func (l *login) negotiateTLS(ctx context.Context) error {
 }
 
 func (l *login) startupMessage(extra [][2]string) []byte {
-	body := binary.BigEndian.AppendUint32(nil, protocolVersion30)
+	body := binary.BigEndian.AppendUint32(nil, l.version)
 	for _, pair := range [][2]string{{"user", l.target.user}, {"database", l.target.database}} {
 		body = append(append(body, terminated(pair[0])...), terminated(pair[1])...)
 	}
@@ -195,6 +205,8 @@ func (l *login) handle(kind byte, body []byte) (bool, error) {
 		return false, parseServerError(body)
 	case msgReadyForQuery:
 		return true, l.finish()
+	case msgNegotiateProtocolVersion:
+		l.offered = body
 	}
 	// Notices and protocol negotiation carry nothing a proxy acts on.
 	return false, nil
