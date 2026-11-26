@@ -63,10 +63,9 @@ func (c *pgConn) begin(ctx context.Context, held lease) (gpool.Tx, error) {
 	return newTx(sessionTx{tx: tx}, held), nil
 }
 
-// ping sends a comment, the cheapest statement there is.
+// ping is caduceus's Ping: a round trip with the cheapest statement there is.
 func (c *pgConn) ping(ctx context.Context) error {
-	_, err := c.session.exec(ctx, "-- ping", nil)
-	return err
+	return c.session.db.Ping(ctx)
 }
 
 // detachedConn is the gpool.Conn given to AfterConnect: the connection before
