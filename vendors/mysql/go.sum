@@ -2,5 +2,5 @@ filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
 filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
 github.com/go-sql-driver/mysql v1.10.0 h1:Q+1LV8DkHJvSYAdR83XzuhDaTykuDx0l6fkXxoWCWfw=
 github.com/go-sql-driver/mysql v1.10.0/go.mod h1:M+cqaI7+xxXGG9swrdeUIoPG3Y3KCkF0pZej+SK+nWk=
-github.com/gsoultan/caduceus v0.0.0-20261126031918-a5e9de7ce45e h1:TG3u/Eq8xA94LOm52xxetUPy1vRQkBIkmKVXy0iOPwY=
-github.com/gsoultan/caduceus v0.0.0-20261126031918-a5e9de7ce45e/go.mod h1:jAqkCGp1iYJOz23BfgFjqfbXa39/n1L3coyoSOLp3Ho=
+github.com/gsoultan/caduceus v0.0.0-20261126032531-5fb34b8975e1 h1:pgXmjQPq+lf+e+Z7i8MpHig1w6KZtbijMwQPHQVkTAQ=
+github.com/gsoultan/caduceus v0.0.0-20261126032531-5fb34b8975e1/go.mod h1:jAqkCGp1iYJOz23BfgFjqfbXa39/n1L3coyoSOLp3Ho=

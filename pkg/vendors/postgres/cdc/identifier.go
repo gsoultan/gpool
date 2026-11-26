@@ -28,9 +28,9 @@ const (
 func quoteQualifiedName(s string) string {
 	schema, table := splitQualifiedName(s)
 	if schema == "" {
-		return caduceus.QuoteIdentifier(table)
+		return caduceus.Identifier{table}.Sanitize()
 	}
-	return caduceus.QuoteIdentifier(schema) + "." + caduceus.QuoteIdentifier(table)
+	return caduceus.Identifier{schema, table}.Sanitize()
 }
 
 // splitQualifiedName splits "schema.table" into its parts. An unqualified name
