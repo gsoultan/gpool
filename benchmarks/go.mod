@@ -8,7 +8,7 @@ go 1.26.5
 require github.com/gsoultan/gpool v1.0.0
 
 require (
-	github.com/gsoultan/caduceus v0.0.0-20261126023755-ce2475d0f1f1
+	github.com/gsoultan/caduceus v0.0.0-20261126030440-0549e0e5e764
 	github.com/jackc/pglogrepl v0.0.0-20260401131349-e37c41485510
 	github.com/jackc/pgx/v5 v5.10.0
 )
