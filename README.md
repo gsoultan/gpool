@@ -254,7 +254,9 @@ pool. What it covers:
 - **TLS** by `sslmode`: `disable`, `prefer` (falls back to plaintext, as libpq does), `require`,
   `verify-ca`, `verify-full`, with `sslrootcert`, `sslcert` and `sslkey`. `allow` connects in
   plaintext and, unlike libpq, does not retry with TLS.
-- **Authentication**: SCRAM-SHA-256 (the server's signature is verified), MD5, and cleartext.
+- **Authentication**: SCRAM-SHA-256 (the server's signature is verified), bound to the TLS
+  connection as SCRAM-SHA-256-PLUS where the server offers it (`channel_binding`), MD5, and
+  cleartext; `require_auth` limits which the server may ask for. `service=` reads the service file.
 - **Protocol 3.2** with PostgreSQL 18 and later, and 3.0 with an older server, which offers it.
   Something in front of the server that refuses 3.2 outright, as PgBouncer before 1.24 does,
   fails with `ErrProtocolVersion`; set `max_protocol_version=3.0` for it. `min_protocol_version`
