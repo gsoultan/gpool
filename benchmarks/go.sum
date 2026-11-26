@@ -1,8 +1,8 @@
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/gsoultan/caduceus v0.0.0-20261126034809-4a5fdbbbc5ab h1:G9ClPnSvWKCtEejDUhk8WCBl+oXD8ZoIURyJjhpZEY4=
-github.com/gsoultan/caduceus v0.0.0-20261126034809-4a5fdbbbc5ab/go.mod h1:jAqkCGp1iYJOz23BfgFjqfbXa39/n1L3coyoSOLp3Ho=
+github.com/gsoultan/caduceus v0.0.0-20261126035801-3a730a7d5a03 h1:73mLVe3sNv0YdYxNAEpb0NBvr8m89YapZY/5EO1TP/A=
+github.com/gsoultan/caduceus v0.0.0-20261126035801-3a730a7d5a03/go.mod h1:jAqkCGp1iYJOz23BfgFjqfbXa39/n1L3coyoSOLp3Ho=
 github.com/jackc/pgio v1.0.0 h1:g12B9UwVnzGhueNavwioyEEpAmqMe1E/BN9ES+8ovkE=
 github.com/jackc/pgio v1.0.0/go.mod h1:oP+2QK2wFfUWgr+gxjoBH9KGBb31Eio69xUb0w5bYf8=
 github.com/jackc/pglogrepl v0.0.0-20260401131349-e37c41485510 h1:+PJCokZ2BhyDKlncScmiNzBwqOx+yH1i8xRlWN/wn6A=
