@@ -52,15 +52,6 @@ func quoteQualifiedNames(tables []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// replicationLiteral renders s as a string literal of the replication
-// command grammar, for START_REPLICATION's plugin options. It is not
-// caduceus.QuoteLiteral: that writes a string with a backslash as E'...',
-// which SQL accepts and the walsender's grammar refuses with a syntax error.
-// That grammar reads a backslash literally, so only the quote is doubled.
-func replicationLiteral(s string) string {
-	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
-}
-
 // hasSQLState reports whether err carries any of the given SQLSTATE codes.
 func hasSQLState(err error, codes ...string) bool {
 	var pgErr *wire.Error

@@ -378,15 +378,11 @@ func (s *pgEventStream) writeStatus(ctx context.Context) error {
 	if err := s.conn.NetConn().SetWriteDeadline(deadline); err != nil {
 		return err
 	}
-	return s.conn.Send(appendStatus(s.conn.Buffer(), received, flushed, time.Now()))
-}
-
-// appendStatus encodes a Standby Status Update: the positions written, flushed
-// and applied, and the client's clock.
-func appendStatus(dst []byte, written, flushed uint64, now time.Time) []byte {
-	var update [34]byte
-	body := replication.AppendStandbyStatus(update[:0], replication.LSN(written), replication.LSN(flushed), replication.LSN(flushed), now, false)
-	return wire.AppendCopyData(dst, body)
+	return s.conn.Send(replication.AppendStandbyStatusUpdate(s.conn.Buffer(), replication.StandbyStatusUpdate{
+		WALWritePosition: replication.LSN(received),
+		WALFlushPosition: replication.LSN(flushed),
+		WALApplyPosition: replication.LSN(flushed),
+	}))
 }
 
 // setErr records the first error to terminate the stream.

@@ -76,8 +76,10 @@ Found by an integration test asserting the wrong thing: resuming from event 2 of
 They cannot be shared. After `START_REPLICATION` the walsender is in CopyBoth where
 an ordinary query is protocol-illegal, and `wire.Conn` is not concurrency-safe anyway.
 Running table management against the streaming connection corrupts the protocol.
-Slot names must be validated (`slotNamePattern`, also in `CreateSlot`/`DropSlot` via
-`validateSlotName`) because the replication grammar takes them unquoted.
+Slot names must be validated (`replication.ValidSlotName` from caduceus, through
+`validateSlotName`, which wraps it as `ErrInvalidConfig`, in config validation and in
+`CreateSlot`/`DropSlot`) because the replication grammar takes them unquoted. The
+walsender commands themselves come from caduceus `replication`; gpool keeps no copy.
 
 ## Decoding
 

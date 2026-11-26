@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gsoultan/caduceus/replication"
 	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
 )
@@ -191,11 +192,13 @@ func (p *Postgres) startReplication(ctx context.Context, conn *wire.Conn, start 
 	// which is the whole point of holding a slot.
 	//
 	// The slot name is interpolated bare, as the replication grammar requires;
-	// it was checked against slotNamePattern when the config was validated.
-	command := fmt.Sprintf("START_REPLICATION SLOT %s LOGICAL %s (proto_version '%d', publication_names %s)",
-		p.config.SlotName, formatLSN(start), protoVersion, replicationLiteral(p.config.PublicationName))
-
-	if err := conn.StartCopyBoth(ctx, command); err != nil {
+	// caduceus checks it, and quotes the publication name in the replication
+	// grammar, which reads a backslash as itself.
+	options := replication.StartOptions{PluginArgs: replication.PgoutputOptions{
+		ProtoVersion: protoVersion,
+		Publications: []string{p.config.PublicationName},
+	}.Args()}
+	if err := replication.StartReplication(ctx, conn, p.config.SlotName, replication.LSN(start), options); err != nil {
 		return fmt.Errorf("gpool/postgres/cdc: starting replication on slot %q: %w", p.config.SlotName, err)
 	}
 	return nil
@@ -363,7 +366,7 @@ func (p *Postgres) DropSlot(ctx context.Context, name string) error {
 	}
 	defer closeConn(conn)
 
-	_, err = conn.Exec(ctx, "DROP_REPLICATION_SLOT "+name)
+	err = replication.DropReplicationSlot(ctx, conn, name, false)
 	if err != nil && !isUndefinedObject(err) {
 		return fmt.Errorf("gpool/postgres/cdc: dropping replication slot %q: %w", name, err)
 	}
@@ -482,7 +485,7 @@ func (p *Postgres) ensureSlot(ctx context.Context, name string) error {
 	}
 	defer closeConn(conn)
 
-	_, err = conn.Exec(ctx, "CREATE_REPLICATION_SLOT "+name+" LOGICAL "+outputPlugin)
+	_, err = replication.CreateReplicationSlot(ctx, conn, name, outputPlugin, replication.SlotOptions{})
 	if err != nil && !isDuplicateObject(err) {
 		return fmt.Errorf("gpool/postgres/cdc: creating replication slot %q: %w", name, err)
 	}
@@ -537,11 +540,12 @@ func (p *Postgres) parseConnString() (*wire.Config, error) {
 	return connConfig, nil
 }
 
-// validateSlotName checks a slot name before it is interpolated into a
-// replication command, which takes it bare.
+// validateSlotName checks a slot name with caduceus, before it is
+// interpolated into a replication command, which takes it bare, and reports
+// a refusal as a config error.
 func validateSlotName(name string) error {
-	if !slotNamePattern.MatchString(name) {
-		return fmt.Errorf("%w: slot name %q must be 1-63 characters of [a-z0-9_]", ErrInvalidConfig, name)
+	if err := replication.ValidSlotName(name); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 	return nil
 }

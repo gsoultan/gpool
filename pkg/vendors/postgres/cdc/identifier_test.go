@@ -65,34 +65,6 @@ func TestSplitQualifiedName(t *testing.T) {
 	}
 }
 
-// Plugin arguments are interpolated into START_REPLICATION, so a quote in a
-// publication name must not be able to close the literal. A backslash stays
-// as it is: written as E'...', as SQL's quoting writes it, the walsender
-// refuses the whole command with a syntax error.
-func TestReplicationLiteral(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{input: "pub", want: `'pub'`},
-		{input: "it's", want: `'it''s'`},
-		{input: `a', injected '`, want: `'a'', injected '''`},
-		{input: `back\slash`, want: `'back\slash'`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
-
-			if got := replicationLiteral(tt.input); got != tt.want {
-				t.Fatalf("replicationLiteral(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 // Classifying catalog errors by SQLSTATE keeps behaviour correct on a server whose
 // lc_messages is not English, where matching on message text silently fails.
 func TestErrorClassificationUsesSQLState(t *testing.T) {

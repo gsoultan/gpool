@@ -26,7 +26,7 @@ behaviour:
 | `pkg/pooling` | The pooling engine: capacity, lock-striped idle buckets, reaper, lifecycle, statistics |
 | `pkg/sqldriver` | Shared pooling for any `database/sql` driver (standard library only) |
 | `pkg/vendors/postgres/pool` | PostgreSQL pool implementation, on the [caduceus](https://github.com/gsoultan/caduceus) driver |
-| `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation, on caduceus's `pgoutput` decoder |
+| `pkg/vendors/postgres/cdc` | PostgreSQL logical-replication implementation, on caduceus's `replication` package: its pgoutput decoder and its walsender commands |
 | `vendors/mysql/cdc` | MySQL and MariaDB binary-log implementation (`go-mysql`), its own module |
 
 ### Supported databases

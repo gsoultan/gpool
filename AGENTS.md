@@ -152,12 +152,13 @@ control path?
 - Identifiers are quoted, and schema-qualified names are split first.
   `caduceus.QuoteIdentifier("public.users")` names a table *called* `public.users`.
 - Values are bound as parameters. String interpolation is only for identifiers and
-  for literals that go through `caduceus.QuoteLiteral`, or `replicationLiteral` in a
+  for literals that go through `caduceus.QuoteLiteral`, or `replication.QuoteLiteral` in a
   replication command, whose grammar refuses the `E'...'` form SQL accepts.
 - What caduceus already provides is used, not rewritten here: quoting, command
-  tags, LSNs, standby status. A helper of the same meaning in two places drifts.
+  tags, LSNs, standby status, the walsender commands (`replication.CreateReplicationSlot`,
+  `DropReplicationSlot`, `StartReplication`, `PgoutputOptions`). A helper of the same meaning in two places drifts.
 - Slot names reach the replication command unquoted, so the character set is
-  validated up front (`slotNamePattern`).
+  validated up front (`replication.ValidSlotName`).
 - Catalog errors are classified by SQLSTATE (`42710`, `42704`), never by message.
 - **Replication slots retain WAL.** A position that stops advancing fills the
   primary's disk. Idle keepalives must carry the confirmed position forward
@@ -229,7 +230,7 @@ both sides of a comparison configured the same?
 **Owns:** injection surfaces, credential handling, denial-of-service resistance.
 
 - **Injection:** every identifier through `caduceus.QuoteIdentifier`/`quoteQualifiedName`,
-  every literal through `caduceus.QuoteLiteral` (`replicationLiteral` in a replication
+  every literal through `caduceus.QuoteLiteral` (`replication.QuoteLiteral` in a replication
   command), every value as a bound parameter. Anything
   interpolated raw (slot names) is validated against an allowlist pattern.
 - **Do not weaken parameter binding for speed.** `QueryExecModeExec` still binds

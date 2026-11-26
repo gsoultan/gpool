@@ -4,7 +4,6 @@ package cdc
 
 import (
 	"fmt"
-	"regexp"
 	"time"
 )
 
@@ -20,11 +19,6 @@ const (
 	// the hook, because unconfirmed events still pin WAL on the primary.
 	DefaultBuffer = 256
 )
-
-// slotNamePattern matches what PostgreSQL accepts for a replication slot name.
-// Slot names are interpolated into the replication command unquoted, so this also
-// closes the injection path that a quoted identifier would otherwise cover.
-var slotNamePattern = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
 
 // Config holds the configuration for the PostgreSQL CDC subscriber.
 type Config struct {
@@ -86,8 +80,8 @@ func (c Config) validate() error {
 	if c.SlotName == "" {
 		return fmt.Errorf("%w: SlotName is required", ErrInvalidConfig)
 	}
-	if !slotNamePattern.MatchString(c.SlotName) {
-		return fmt.Errorf("%w: SlotName %q must be 1-63 characters of [a-z0-9_]", ErrInvalidConfig, c.SlotName)
+	if err := validateSlotName(c.SlotName); err != nil {
+		return err
 	}
 	if c.PublicationName == "" {
 		return fmt.Errorf("%w: PublicationName is required", ErrInvalidConfig)
