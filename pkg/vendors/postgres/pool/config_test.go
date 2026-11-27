@@ -7,8 +7,6 @@ import (
 	"runtime"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 const testConnString = "postgres://user:pass@127.0.0.1:5432/testdb"
@@ -131,74 +129,46 @@ func TestConfigParseRejectsBadConnString(t *testing.T) {
 	}
 }
 
-// DISCARD ALL deallocates the server's prepared statements. Leaving pgx's default
-// statement-caching mode in place makes the client keep referencing names the
-// server has dropped, and the connection's next use fails with SQLSTATE 26000.
-func TestConfigResetQuerySelectsACompatibleExecMode(t *testing.T) {
+// DISCARD ALL deallocates the server's prepared statements. A session that went
+// on caching them would keep binding names the server has dropped, and the
+// connection's next use would fail with SQLSTATE 26000.
+func TestConfigResetQueryDisablesTheStatementCache(t *testing.T) {
 	t.Parallel()
 
 	withReset, err := Config{ConnString: testConnString, ResetQuery: "DISCARD ALL"}.parse()
 	if err != nil {
 		t.Fatalf("parse() = %v", err)
 	}
-	if withReset.DefaultQueryExecMode != resetSafeQueryExecMode {
-		t.Errorf("DefaultQueryExecMode = %v, want %v", withReset.DefaultQueryExecMode, resetSafeQueryExecMode)
+	if withReset.statements != 0 {
+		t.Errorf("statements = %d with a reset query, want 0", withReset.statements)
 	}
 
-	// Without a reset query, and with a statement cache to use, the driver's own
-	// default is left alone.
 	plain, err := Config{ConnString: testConnString}.parse()
 	if err != nil {
 		t.Fatalf("parse() = %v", err)
 	}
-	if plain.DefaultQueryExecMode != pgx.QueryExecModeCacheStatement {
-		t.Errorf("DefaultQueryExecMode = %v, want the driver default", plain.DefaultQueryExecMode)
+	if plain.statements != DefaultStatementCacheCapacity {
+		t.Errorf("statements = %d, want %d", plain.statements, DefaultStatementCacheCapacity)
 	}
 }
 
-// The per-connection statement and description caches are the largest slice of the
-// pool's memory. pgx preallocates each one's map at capacity, so the default is set
-// well below pgx's own 512.
+// The per-connection caches are multiplied by MaxConns, so their defaults are
+// bounded and an explicit capacity, including none, is honoured. descriptions is
+// what a connection that keeps no statements on the server remembers of them
+// instead, and is resolved whether or not it will be used.
 func TestConfigBoundsPerConnectionCaches(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		config          Config
-		wantStatement   int
-		wantDescription int
-		wantExecMode    pgx.QueryExecMode
+		name         string
+		config       Config
+		want         int
+		descriptions int
 	}{
-		{
-			name:            "defaults are bounded",
-			config:          Config{ConnString: testConnString},
-			wantStatement:   DefaultStatementCacheCapacity,
-			wantDescription: DefaultDescriptionCacheCapacity,
-			wantExecMode:    pgx.QueryExecModeCacheStatement,
-		},
-		{
-			name:            "explicit capacity is honoured",
-			config:          Config{ConnString: testConnString, StatementCacheCapacity: 256, DescriptionCacheCapacity: 8},
-			wantStatement:   256,
-			wantDescription: 8,
-			wantExecMode:    pgx.QueryExecModeCacheStatement,
-		},
-		{
-			// With no statement cache the default exec mode has nowhere to cache
-			// into, so the connection must move off named server-side statements.
-			name:            "disabling the statement cache changes the exec mode",
-			config:          Config{ConnString: testConnString, StatementCacheCapacity: DisableCache},
-			wantStatement:   0,
-			wantDescription: DefaultDescriptionCacheCapacity,
-			wantExecMode:    resetSafeQueryExecMode,
-		},
-		{
-			name:            "both caches disabled",
-			config:          Config{ConnString: testConnString, StatementCacheCapacity: DisableCache, DescriptionCacheCapacity: DisableCache},
-			wantStatement:   0,
-			wantDescription: 0,
-			wantExecMode:    resetSafeQueryExecMode,
-		},
+		{name: "defaults are bounded", config: Config{ConnString: testConnString}, want: DefaultStatementCacheCapacity, descriptions: DefaultDescriptionCacheCapacity},
+		{name: "explicit capacity is honoured", config: Config{ConnString: testConnString, StatementCacheCapacity: 256, DescriptionCacheCapacity: 128}, want: 256, descriptions: 128},
+		{name: "the cache can be disabled", config: Config{ConnString: testConnString, StatementCacheCapacity: DisableCache}, want: 0, descriptions: DefaultDescriptionCacheCapacity},
+		{name: "and so can remembering descriptions", config: Config{ConnString: testConnString, StatementCacheCapacity: DisableCache, DescriptionCacheCapacity: DisableCache}, want: 0, descriptions: 0},
 	}
 
 	for _, tt := range tests {
@@ -209,14 +179,11 @@ func TestConfigBoundsPerConnectionCaches(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse() = %v", err)
 			}
-			if got.StatementCacheCapacity != tt.wantStatement {
-				t.Errorf("StatementCacheCapacity = %d, want %d", got.StatementCacheCapacity, tt.wantStatement)
+			if got.statements != tt.want {
+				t.Errorf("statements = %d, want %d", got.statements, tt.want)
 			}
-			if got.DescriptionCacheCapacity != tt.wantDescription {
-				t.Errorf("DescriptionCacheCapacity = %d, want %d", got.DescriptionCacheCapacity, tt.wantDescription)
-			}
-			if got.DefaultQueryExecMode != tt.wantExecMode {
-				t.Errorf("DefaultQueryExecMode = %v, want %v", got.DefaultQueryExecMode, tt.wantExecMode)
+			if got.descriptions != tt.descriptions {
+				t.Errorf("descriptions = %d, want %d", got.descriptions, tt.descriptions)
 			}
 		})
 	}
@@ -235,10 +202,10 @@ func TestConfigParseIsOrderIndependent(t *testing.T) {
 		t.Fatalf("withDefaults().parse() = %v", err)
 	}
 
-	if raw.StatementCacheCapacity != defaulted.StatementCacheCapacity {
-		t.Errorf("StatementCacheCapacity: raw %d, defaulted %d", raw.StatementCacheCapacity, defaulted.StatementCacheCapacity)
+	if raw.statements != defaulted.statements {
+		t.Errorf("statements: raw %d, defaulted %d", raw.statements, defaulted.statements)
 	}
-	if raw.DefaultQueryExecMode != defaulted.DefaultQueryExecMode {
-		t.Errorf("DefaultQueryExecMode: raw %v, defaulted %v", raw.DefaultQueryExecMode, defaulted.DefaultQueryExecMode)
+	if raw.descriptions != defaulted.descriptions {
+		t.Errorf("descriptions: raw %d, defaulted %d", raw.descriptions, defaulted.descriptions)
 	}
 }

@@ -6,12 +6,12 @@ import (
 	"context"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5"
 )
 
 var _ gpool.Batcher = (*connWrapper)(nil)
 
-// SendBatch pipelines the batch's statements in one round trip.
+// SendBatch pipelines the batch's statements: one round trip when every
+// statement is already prepared on this connection, two when some are not.
 //
 // Unlike CopyFrom there is no pool-level form: the returned reader stays valid
 // only while the connection is held, so the caller must own that lifetime.
@@ -22,10 +22,9 @@ func (c *connWrapper) SendBatch(ctx context.Context, batch *gpool.Batch) gpool.B
 	if batch == nil || batch.Len() == 0 {
 		return failedBatchResults{err: ErrEmptyBatch}
 	}
-
-	pgBatch := &pgx.Batch{}
-	for _, query := range batch.Queries() {
-		pgBatch.Queue(query.SQL, query.Arguments...)
+	reader, err := c.conn().session.batch(ctx, batch.Queries())
+	if err != nil {
+		return failedBatchResults{err: err}
 	}
-	return &batchResults{results: c.pgx().SendBatch(ctx, pgBatch)}
+	return &batchResults{reader: reader}
 }

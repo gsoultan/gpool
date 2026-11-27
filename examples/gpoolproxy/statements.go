@@ -59,7 +59,7 @@ type statement struct {
 }
 
 func newStatements(limit int) *statements {
-	return &statements{byName: make(map[string]*statement), limit: limit}
+	return &statements{limit: limit}
 }
 
 // remember records a Parse so it can be replayed onto another backend, and names
@@ -69,8 +69,15 @@ func newStatements(limit int) *statements {
 // next Parse, every client overwrites it constantly, and replaying a stale one
 // would bind arguments to the wrong SQL.
 func (s *statements) remember(name string, message []byte) (evicted string, didEvict bool) {
+	evicted, _, didEvict = s.displace(name, message)
+	return evicted, didEvict
+}
+
+// displace is remember, and also returns the Parse of whatever was discarded,
+// so that a discard the server turns out not to have made can be undone.
+func (s *statements) displace(name string, message []byte) (evicted string, evictedMessage []byte, didEvict bool) {
 	if name == "" {
-		return "", false
+		return "", nil, false
 	}
 	s.uses++
 
@@ -79,14 +86,19 @@ func (s *statements) remember(name string, message []byte) (evicted string, didE
 	if held, ok := s.byName[name]; ok {
 		held.message = bytes.Clone(message)
 		held.used = s.uses
-		return "", false
+		return "", nil, false
 	}
 
 	if s.limit > 0 && len(s.byName) >= s.limit {
-		evicted, didEvict = s.evict()
+		evicted, evictedMessage, didEvict = s.evict()
+	}
+	// Allocated on first use: most sessions never name a statement, and the map
+	// would otherwise be the largest thing an idle client holds.
+	if s.byName == nil {
+		s.byName = make(map[string]*statement)
 	}
 	s.byName[name] = &statement{message: bytes.Clone(message), used: s.uses}
-	return evicted, didEvict
+	return evicted, evictedMessage, didEvict
 }
 
 // evict discards the least recently used statement and names it.
@@ -96,7 +108,7 @@ func (s *statements) remember(name string, message []byte) (evicted string, didE
 // nothing beside the round trip the Parse that triggered it is about to make. The
 // cost an adversarial client can impose is therefore a constant per message, not
 // a growing one.
-func (s *statements) evict() (string, bool) {
+func (s *statements) evict() (string, []byte, bool) {
 	var oldest string
 	var oldestUse uint64
 	first := true
@@ -107,20 +119,54 @@ func (s *statements) evict() (string, bool) {
 		}
 	}
 	if first {
-		return "", false
+		return "", nil, false
 	}
+	message := s.byName[oldest].message
 	delete(s.byName, oldest)
-	return oldest, true
+	return oldest, message, true
 }
 
 func (s *statements) forget(name string) {
 	delete(s.byName, name)
 }
 
+// peek returns a remembered Parse without counting it as a use.
+func (s *statements) peek(name string) ([]byte, bool) {
+	held, ok := s.byName[name]
+	if !ok {
+		return nil, false
+	}
+	return held.message, true
+}
+
+// restore puts back a Parse that a change the server skipped had taken out or
+// replaced. It takes the message as it is, already a copy of its own, and it
+// may leave the set one over its limit until the next statement is remembered.
+func (s *statements) restore(name string, message []byte) {
+	if s.byName == nil {
+		s.byName = make(map[string]*statement)
+	}
+	s.uses++
+	s.byName[name] = &statement{message: message, used: s.uses}
+}
+
 // lookup returns a remembered Parse and marks it as the most recently used, which
 // is what keeps a client's working set from being evicted out from under it.
 func (s *statements) lookup(name string) ([]byte, bool) {
 	held, ok := s.byName[name]
+	if !ok {
+		return nil, false
+	}
+	s.uses++
+	held.used = s.uses
+	return held.message, true
+}
+
+// find is lookup for a name still sitting in a message buffer. Converting it to
+// a string to ask would allocate, and this is asked once for every Bind — which
+// is to say once for every query a client with a statement cache runs.
+func (s *statements) find(name []byte) ([]byte, bool) {
+	held, ok := s.byName[string(name)]
 	if !ok {
 		return nil, false
 	}
@@ -137,25 +183,6 @@ func (s *statements) len() int {
 // first null-terminated string in its body.
 func parseName(body []byte) (string, bool) {
 	return cString(body)
-}
-
-// bindName reads the statement a Bind refers to. Its body is the portal name
-// then the statement name.
-func bindName(body []byte) (string, bool) {
-	_, rest, ok := cutBytes(body)
-	if !ok {
-		return "", false
-	}
-	return cString(rest)
-}
-
-// targetName reads the statement a Describe or Close refers to, and reports
-// whether it refers to a statement at all rather than to a portal.
-func targetName(body []byte) (string, bool) {
-	if len(body) == 0 || body[0] != describeStatement {
-		return "", false
-	}
-	return cString(body[1:])
 }
 
 // cString reads a null-terminated string from the front of a buffer.
@@ -204,14 +231,34 @@ func closeStatement(name string) []byte {
 }
 
 // statementNameOf reads the prepared statement a message refers to, for the
-// message types that refer to one by name.
-func statementNameOf(kind byte, body []byte) (string, bool) {
+// message types that refer to one by name. The name is a slice of the message,
+// not a copy of it.
+func statementNameOf(kind byte, body []byte) ([]byte, bool) {
 	switch kind {
 	case msgBind:
-		return bindName(body)
+		// Portal name, then statement name.
+		portal := bytes.IndexByte(body, 0)
+		if portal < 0 {
+			return nil, false
+		}
+		return cBytes(body[portal+1:])
 	case msgDescribe, msgClose:
-		return targetName(body)
+		// Describe and Close name a portal as readily as a statement.
+		if len(body) == 0 || body[0] != describeStatement {
+			return nil, false
+		}
+		return cBytes(body[1:])
 	default:
-		return "", false
+		return nil, false
 	}
+}
+
+// cBytes reads a null-terminated string from the front of a buffer without
+// copying it.
+func cBytes(body []byte) ([]byte, bool) {
+	end := bytes.IndexByte(body, 0)
+	if end < 0 {
+		return nil, false
+	}
+	return body[:end], true
 }

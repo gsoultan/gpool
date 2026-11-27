@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/gpool"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
 	postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
-	"github.com/jackc/pgx/v5"
 )
 
 // The pool's whole reason for bounding connection lifetime is that servers go
@@ -33,7 +33,7 @@ import (
 func taggedPool(t *testing.T, tag string, config postgrespool.Config) gpool.Pool {
 	t.Helper()
 
-	config.BeforeConnect = func(c *pgx.ConnConfig) error {
+	config.BeforeConnect = func(c *wire.Config) error {
 		c.RuntimeParams["application_name"] = tag
 		return nil
 	}
@@ -44,14 +44,10 @@ func taggedPool(t *testing.T, tag string, config postgrespool.Config) gpool.Pool
 func terminate(t *testing.T, tag string) int {
 	t.Helper()
 
-	conn, err := pgx.Connect(t.Context(), connString(t))
-	if err != nil {
-		t.Fatalf("pgx.Connect() = %v", err)
-	}
-	defer conn.Close(context.Background())
+	conn := newPool(t, postgrespool.Config{MaxConns: 1})
 
 	var killed int
-	err = conn.QueryRow(t.Context(), `
+	err := conn.QueryRow(t.Context(), `
 SELECT count(*)::int FROM (
     SELECT pg_terminate_backend(pid) FROM pg_stat_activity
     WHERE application_name = $1 AND pid <> pg_backend_pid()
@@ -233,11 +229,7 @@ func TestCDCRecoversWhenItsWalsenderIsTerminated(t *testing.T) {
 		t.Fatal("no event arrived before the failure was injected")
 	}
 
-	control, err := pgx.Connect(t.Context(), connString(t))
-	if err != nil {
-		t.Fatalf("pgx.Connect() = %v", err)
-	}
-	defer control.Close(context.Background())
+	control := newPool(t, postgrespool.Config{MaxConns: 1})
 
 	var killed int
 	err = control.QueryRow(t.Context(), `

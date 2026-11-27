@@ -6,7 +6,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/gsoultan/caduceus"
+	"github.com/gsoultan/caduceus/wire"
 )
 
 // SQLSTATE codes used to classify catalog errors. Matching on codes rather than on
@@ -18,11 +19,6 @@ const (
 	codeUndefinedTable  = "42P01"
 )
 
-// quoteIdentifier renders s as a single quoted SQL identifier.
-func quoteIdentifier(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
-
 // quoteQualifiedName renders a possibly schema-qualified table name.
 //
 // Quoting "public.users" as one identifier would name a table literally called
@@ -32,9 +28,9 @@ func quoteIdentifier(s string) string {
 func quoteQualifiedName(s string) string {
 	schema, table := splitQualifiedName(s)
 	if schema == "" {
-		return quoteIdentifier(table)
+		return caduceus.Identifier{table}.Sanitize()
 	}
-	return quoteIdentifier(schema) + "." + quoteIdentifier(table)
+	return caduceus.Identifier{schema, table}.Sanitize()
 }
 
 // splitQualifiedName splits "schema.table" into its parts. An unqualified name
@@ -56,14 +52,9 @@ func quoteQualifiedNames(tables []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// quoteLiteral renders s as a SQL string literal.
-func quoteLiteral(s string) string {
-	return `'` + strings.ReplaceAll(s, `'`, `''`) + `'`
-}
-
 // hasSQLState reports whether err carries any of the given SQLSTATE codes.
 func hasSQLState(err error, codes ...string) bool {
-	var pgErr *pgconn.PgError
+	var pgErr *wire.Error
 	if !errors.As(err, &pgErr) {
 		return false
 	}

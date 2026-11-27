@@ -15,8 +15,17 @@ unimportable and is the reason the tree was restructured.
   so single-database callers are unaffected.
 - `pkg/gpool/cdc` — `Subscriber` composed from `Stream` + `TableManager` +
   `ReplicationManager` + `Close`. Also `EventStream`, `Event`, `Op`.
-- `pkg/vendors/postgres/pool` — pgx/v5.
-- `pkg/vendors/postgres/cdc` — pglogrepl.
+- `github.com/gsoultan/caduceus` — the PostgreSQL driver, its own repository and
+  module, stdlib only (no database/sql, pgx or pglogrepl). `wire` is the protocol
+  (connect, TLS, SCRAM/MD5, guard: context → deadline + CancelRequest, CopyBoth);
+  `codec` converts types (binary results where known, parameters for the
+  server-described OID); `caduceus.Conn` runs queries, batches, COPY and
+  transactions with an LRU statement cache; `replication` decodes pgoutput.
+- `pkg/vendors/postgres/pool` — adapter: `session` wraps `*caduceus.Conn` and its
+  `*wire.Conn`; `bindable` resolves `driver.Valuer` args, which caduceus does not
+  know, before they are bound.
+- `pkg/vendors/postgres/cdc` — logical replication: the stream loop, slot and
+  publication DDL, positions; `replication.Decoder` does the decoding.
 - `vendors/mssql/cdc` — SQL Server change tables, a package *inside* the pool
   vendor's module because it needs no dependency the pool lacks. The third CDC
   vendor and the first that polls rather than tails. See `mem:cdc_mssql`.
@@ -44,6 +53,7 @@ unimportable and is the reason the tree was restructured.
   start is worse).
 - Adding a vendor must need zero edits to `pkg/gpool`.
 
-Dependencies are deliberately minimal: pgx/v5 and pglogrepl, nothing else.
+The core module requires only caduceus, which requires nothing. pgx and pglogrepl
+survive only in `benchmarks/`, its own module, and in caduceus's `benchmarks/`.
 `golang.org/x/sync` was dropped when the semaphore gave way to a token channel
 (`mem:scale`). Adding one back needs justification.

@@ -3,19 +3,20 @@
 package pool
 
 import (
+	"github.com/gsoultan/caduceus"
 	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // pgResult is the outcome of an Exec, implementing gpool.Result.
 // It is an immutable value, so it carries no release hazard of its own.
 type pgResult struct {
-	tag pgconn.CommandTag
+	tag caduceus.CommandTag
 }
 
 var _ gpool.Result = pgResult{}
 
-// RowsAffected returns the number of rows the statement changed.
+// RowsAffected returns the number of rows the statement changed: the last
+// number in its command tag, as in "INSERT 0 5" or "UPDATE 3".
 func (r pgResult) RowsAffected() int64 {
 	return r.tag.RowsAffected()
 }

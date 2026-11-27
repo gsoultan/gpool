@@ -5,8 +5,8 @@ package cdc
 import (
 	"fmt"
 
+	"github.com/gsoultan/caduceus/replication"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	"github.com/jackc/pglogrepl"
 )
 
 // position renders a WAL offset as a cdc.Position, in PostgreSQL's own "X/Y"
@@ -17,8 +17,11 @@ import (
 // arithmetic on a uint64 and happens on the reader's hot path; only the value
 // handed to the consumer is text.
 func position(lsn uint64) cdc.Position {
-	return cdc.Position(pglogrepl.LSN(lsn).String())
+	return cdc.Position(formatLSN(lsn))
 }
+
+// formatLSN writes an LSN as the server does, "X/Y".
+func formatLSN(lsn uint64) string { return replication.LSN(lsn).String() }
 
 // parsePosition reads a position this vendor produced back into a WAL offset.
 //
@@ -29,10 +32,14 @@ func parsePosition(p cdc.Position) (uint64, error) {
 	if p == cdc.NoPosition {
 		return 0, nil
 	}
-
-	lsn, err := pglogrepl.ParseLSN(string(p))
+	lsn, err := parseLSN(string(p))
 	if err != nil {
 		return 0, fmt.Errorf("%w: position %q is not a PostgreSQL LSN: %w", ErrInvalidConfig, p, err)
 	}
-	return uint64(lsn), nil
+	return lsn, nil
+}
+
+func parseLSN(s string) (uint64, error) {
+	lsn, err := replication.ParseLSN(s)
+	return uint64(lsn), err
 }

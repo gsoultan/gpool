@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,8 +16,6 @@ import (
 	"time"
 
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // These tests need a real PostgreSQL. The proxy is protocol code: a unit test
@@ -55,6 +55,14 @@ func startProxy(t *testing.T, pool pooling.Config) string {
 // startProxyLimited is startProxy with an explicit ceiling on remembered prepared
 // statements, so a test can reach the limit without preparing five hundred.
 func startProxyLimited(t *testing.T, pool pooling.Config, maxPrepared int) string {
+	return startProxyWith(t, func(config *Config) {
+		config.Pool = pool
+		config.MaxPreparedStatements = maxPrepared
+	})
+}
+
+// startProxyWith is startProxy for a test that needs to set something else.
+func startProxyWith(t *testing.T, configure func(*Config)) string {
 	t.Helper()
 
 	credential, err := deriveVerifier(proxyPassword, defaultSCRAMIterations)
@@ -66,13 +74,14 @@ func startProxyLimited(t *testing.T, pool pooling.Config, maxPrepared int) strin
 		t.Fatalf("WriteFile() = %v", err)
 	}
 
-	proxy, err := NewProxy(Config{
-		Listen:                "127.0.0.1:0",
-		Upstream:              upstreamURL(t, appName),
-		Userlist:              userlist,
-		Pool:                  pool,
-		MaxPreparedStatements: maxPrepared,
-	})
+	config := Config{
+		Listen:   "127.0.0.1:0",
+		Upstream: upstreamURL(t, appName),
+		Userlist: userlist,
+	}
+	configure(&config)
+
+	proxy, err := NewProxy(config)
 	if err != nil {
 		t.Fatalf("NewProxy() = %v", err)
 	}
@@ -89,37 +98,15 @@ func startProxyLimited(t *testing.T, pool pooling.Config, maxPrepared int) strin
 		}
 	})
 
-	return fmt.Sprintf("postgres://%s:%s@%s/postgres?sslmode=disable&default_query_exec_mode=exec",
-		proxyUser, proxyPassword, proxy.Addr())
-}
-
-// cachingURL is the same proxy with pgx's statement cache left on, which is the
-// default and the mode that names its prepared statements.
-func cachingURL(url string) string {
-	return strings.Replace(url, "&default_query_exec_mode=exec", "", 1)
-}
-
-func connect(t *testing.T, url string) *pgx.Conn {
-	t.Helper()
-
-	conn, err := pgx.Connect(t.Context(), url)
-	if err != nil {
-		t.Fatalf("pgx.Connect() = %v", err)
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = conn.Close(ctx)
-	})
-	return conn
+	return fmt.Sprintf("postgres://%s:%s@%s/postgres?sslmode=disable", proxyUser, proxyPassword, proxy.Addr())
 }
 
 func TestProxyRunsQueries(t *testing.T) {
 	conn := connect(t, startProxy(t, pooling.Config{MaxConns: 4}))
 
-	var answer int
-	if err := conn.QueryRow(t.Context(), "SELECT $1::int + 1", 41).Scan(&answer); err != nil {
-		t.Fatalf("QueryRow() = %v", err)
+	answer, err := conn.number("SELECT $1::int + 1", 41)
+	if err != nil {
+		t.Fatalf("query = %v", err)
 	}
 	if answer != 42 {
 		t.Errorf("answer = %d, want 42", answer)
@@ -127,24 +114,26 @@ func TestProxyRunsQueries(t *testing.T) {
 }
 
 // The result set has to survive being relayed without being decoded, including
-// rows larger than the relay buffer, which take the streaming path instead.
+// rows larger than the read buffer, which cross in pieces instead.
 func TestProxyRelaysLargeResults(t *testing.T) {
 	conn := connect(t, startProxy(t, pooling.Config{MaxConns: 2}))
 
-	var total, size int
-	err := conn.QueryRow(t.Context(),
-		"SELECT count(*), max(length(payload)) FROM (SELECT repeat('x', $1::int) AS payload FROM generate_series(1, 500)) s",
-		relayChunk*40).Scan(&total, &size)
+	rows, err := conn.query(
+		"SELECT repeat('x', $1::int) AS payload FROM generate_series(1, 500)", readBufSize*3)
 	if err != nil {
-		t.Fatalf("QueryRow() = %v", err)
+		t.Fatalf("query = %v", err)
 	}
-	if total != 500 || size != relayChunk*40 {
-		t.Errorf("got %d rows of %d bytes, want 500 of %d", total, size, relayChunk*40)
+	if len(rows) != 500 {
+		t.Fatalf("got %d rows, want 500", len(rows))
+	}
+	for _, row := range rows {
+		if len(row[0]) != readBufSize*3 {
+			t.Fatalf("got a row of %d bytes, want %d", len(row[0]), readBufSize*3)
+		}
 	}
 }
 
-// This is the question the proxy exists to answer. Many independent client
-// pools — standing in for separate applications — must not add up to more
+// This is the question the proxy exists to answer. Many independent clients — standing in for separate applications — must not add up to more
 // PostgreSQL backends than the proxy was told to open. An in-process library
 // pool cannot enforce this, because it cannot see the other applications.
 func TestProxyBoundsBackendsAcrossIndependentClients(t *testing.T) {
@@ -163,38 +152,27 @@ func TestProxyBoundsBackendsAcrossIndependentClients(t *testing.T) {
 	var wg sync.WaitGroup
 	var peak, failures atomic.Int64
 
-	for range applications {
-		config, err := pgxpool.ParseConfig(url)
-		if err != nil {
-			t.Fatalf("ParseConfig() = %v", err)
-		}
-		config.MaxConns = perApplication
-		config.MinConns = perApplication
+	for range applications * perApplication {
+		// Every connection is open before any of them runs a query, so the
+		// proxy is holding all of them at once for the whole measurement.
+		conn := connect(t, url)
 
-		application, err := pgxpool.NewWithConfig(t.Context(), config)
-		if err != nil {
-			t.Fatalf("pgxpool.NewWithConfig() = %v", err)
-		}
-		t.Cleanup(application.Close)
-
-		for range perApplication {
-			wg.Go(func() {
-				for range 20 {
-					var seen int64
-					if err := application.QueryRow(t.Context(),
-						"SELECT count(*)::int FROM pg_stat_activity WHERE application_name = $1", appName,
-					).Scan(&seen); err != nil {
-						failures.Add(1)
-						return
-					}
-					for observed := peak.Load(); seen > observed; observed = peak.Load() {
-						if peak.CompareAndSwap(observed, seen) {
-							break
-						}
+		wg.Go(func() {
+			for range 20 {
+				count, err := conn.number(
+					"SELECT count(*)::int FROM pg_stat_activity WHERE application_name = $1", appName)
+				if err != nil {
+					failures.Add(1)
+					return
+				}
+				seen := int64(count)
+				for observed := peak.Load(); seen > observed; observed = peak.Load() {
+					if peak.CompareAndSwap(observed, seen) {
+						break
 					}
 				}
-			})
-		}
+			}
+		})
 	}
 	wg.Wait()
 
@@ -209,10 +187,10 @@ func TestProxyBoundsBackendsAcrossIndependentClients(t *testing.T) {
 	t.Logf("%d client connections across %d applications ran on at most %d PostgreSQL backends",
 		applications*perApplication, applications, highest)
 
-	var remaining int
-	if err := observer.QueryRow(t.Context(),
-		"SELECT count(*)::int FROM pg_stat_activity WHERE application_name = $1", appName).Scan(&remaining); err != nil {
-		t.Fatalf("QueryRow() = %v", err)
+	remaining, err := observer.number(
+		"SELECT count(*)::int FROM pg_stat_activity WHERE application_name = $1", appName)
+	if err != nil {
+		t.Fatalf("query = %v", err)
 	}
 	if remaining > backends {
 		t.Errorf("%d backends left behind, want at most %d", remaining, backends)
@@ -227,41 +205,38 @@ func TestProxyKeepsATransactionOnOneBackend(t *testing.T) {
 	conn := connect(t, url)
 
 	table := fmt.Sprintf("gpoolproxy_tx_%d", time.Now().UnixNano()%1_000_000_000)
-	if _, err := conn.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s (id int)", table)); err != nil {
+	if _, err := conn.query(fmt.Sprintf("CREATE TABLE %s (id int)", table)); err != nil {
 		t.Fatalf("CREATE TABLE = %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = conn.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+		_, _ = conn.query(fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
 	})
 
-	tx, err := conn.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("Begin() = %v", err)
+	if _, err := conn.query("BEGIN"); err != nil {
+		t.Fatalf("BEGIN = %v", err)
 	}
 	for id := range 25 {
-		if _, err := tx.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s VALUES ($1)", table), id); err != nil {
+		if _, err := conn.query(fmt.Sprintf("INSERT INTO %s VALUES ($1)", table), id); err != nil {
 			t.Fatalf("INSERT = %v", err)
 		}
 	}
 
 	// Visible inside the transaction...
-	var inside int
-	if err := tx.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*)::int FROM %s", table)).Scan(&inside); err != nil {
+	inside, err := conn.number(fmt.Sprintf("SELECT count(*)::int FROM %s", table))
+	if err != nil {
 		t.Fatalf("count inside = %v", err)
 	}
 	if inside != 25 {
 		t.Errorf("inside the transaction: %d rows, want 25", inside)
 	}
 
-	if err := tx.Rollback(t.Context()); err != nil {
-		t.Fatalf("Rollback() = %v", err)
+	if _, err := conn.query("ROLLBACK"); err != nil {
+		t.Fatalf("ROLLBACK = %v", err)
 	}
 
 	// ...and gone after rollback, whichever backend answers next.
-	var after int
-	if err := conn.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*)::int FROM %s", table)).Scan(&after); err != nil {
+	after, err := conn.number(fmt.Sprintf("SELECT count(*)::int FROM %s", table))
+	if err != nil {
 		t.Fatalf("count after = %v", err)
 	}
 	if after != 0 {
@@ -278,36 +253,31 @@ func TestProxyRollsBackAnAbandonedTransaction(t *testing.T) {
 
 	table := fmt.Sprintf("gpoolproxy_abandoned_%d", time.Now().UnixNano()%1_000_000_000)
 	setup := connect(t, url)
-	if _, err := setup.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY)", table)); err != nil {
+	if _, err := setup.query(fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY)", table)); err != nil {
 		t.Fatalf("CREATE TABLE = %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = setup.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+		_, _ = setup.query(fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
 	})
 
-	abandoner, err := pgx.Connect(t.Context(), url)
+	abandoner, err := dialClient(t.Context(), url)
 	if err != nil {
-		t.Fatalf("pgx.Connect() = %v", err)
+		t.Fatalf("dialClient() = %v", err)
 	}
-	tx, err := abandoner.Begin(t.Context())
-	if err != nil {
-		t.Fatalf("Begin() = %v", err)
+	if _, err := abandoner.query("BEGIN"); err != nil {
+		t.Fatalf("BEGIN = %v", err)
 	}
-	if _, err := tx.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s VALUES (1)", table)); err != nil {
+	if _, err := abandoner.query(fmt.Sprintf("INSERT INTO %s VALUES (1)", table)); err != nil {
 		t.Fatalf("INSERT = %v", err)
 	}
 
-	// Walk away holding the row lock.
-	if err := abandoner.PgConn().Conn().Close(); err != nil {
-		t.Fatalf("closing the underlying socket = %v", err)
+	// Walk away holding the row lock, without so much as a Terminate.
+	if err := abandoner.conn.Close(); err != nil {
+		t.Fatalf("closing the socket = %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-	defer cancel()
-
-	if _, err := setup.Exec(ctx, fmt.Sprintf("INSERT INTO %s VALUES (1)", table)); err != nil {
+	setup.timeout = 20 * time.Second
+	if _, err := setup.query(fmt.Sprintf("INSERT INTO %s VALUES (1)", table)); err != nil {
 		t.Fatalf("the abandoned transaction was not rolled back, so its lock outlived its client: %v", err)
 	}
 }
@@ -316,8 +286,13 @@ func TestProxyRejectsTheWrongPassword(t *testing.T) {
 	url := startProxy(t, pooling.Config{MaxConns: 2})
 	wrong := strings.Replace(url, proxyPassword, "not-the-password", 1)
 
-	if _, err := pgx.Connect(t.Context(), wrong); err == nil {
+	conn, err := dialClient(t.Context(), wrong)
+	if err == nil {
+		conn.close()
 		t.Fatal("connecting with the wrong password succeeded")
+	}
+	if code := sqlState(err); code != "28P01" {
+		t.Errorf("SQLSTATE = %q (%v), want 28P01", code, err)
 	}
 }
 
@@ -325,7 +300,9 @@ func TestProxyRejectsAnUnknownUser(t *testing.T) {
 	url := startProxy(t, pooling.Config{MaxConns: 2})
 	unknown := strings.Replace(url, "//"+proxyUser+":", "//nobody:", 1)
 
-	if _, err := pgx.Connect(t.Context(), unknown); err == nil {
+	conn, err := dialClient(t.Context(), unknown)
+	if err == nil {
+		conn.close()
 		t.Fatal("connecting as an unknown user succeeded")
 	}
 }
@@ -380,11 +357,11 @@ func TestUserlistAcceptsBothSecretForms(t *testing.T) {
 // the client fails — the limitation PgBouncer carried until 1.21, and the one
 // this example's README used to name as its gap.
 //
-// pgx's default execution mode is the test: it caches statements under generated
-// names, so every query after the first is a Bind against a name that only one
-// backend knows.
+// A caching client is the test: it prepares each query once under a generated
+// name, as client libraries do by default, so every query after the first is a
+// Bind against a name that only one backend knows.
 func TestProxyKeepsPreparedStatementsAcrossBackends(t *testing.T) {
-	url := cachingURL(startProxy(t, pooling.Config{MaxConns: 2}))
+	url := startProxy(t, pooling.Config{MaxConns: 2})
 
 	// More clients than backends, so each is repeatedly handed a connection some
 	// other client last prepared on.
@@ -393,16 +370,17 @@ func TestProxyKeepsPreparedStatementsAcrossBackends(t *testing.T) {
 
 	for range 8 {
 		wg.Go(func() {
-			conn, err := pgx.Connect(context.Background(), url)
+			conn, err := dialClient(context.Background(), url)
 			if err != nil {
 				failures.Add(1)
 				return
 			}
-			defer conn.Close(context.Background())
+			defer conn.close()
+			conn.caching()
 
 			for i := range 40 {
-				var answer int
-				if err := conn.QueryRow(context.Background(), "SELECT $1::int + 1", i).Scan(&answer); err != nil {
+				answer, err := conn.number("SELECT $1::int + 1", i)
+				if err != nil {
 					t.Errorf("query %d: %v", i, err)
 					failures.Add(1)
 					return
@@ -428,34 +406,35 @@ func TestProxyKeepsPreparedStatementsAcrossBackends(t *testing.T) {
 // outcome available. The proxy has to notice and re-parse.
 func TestProxyIsolatesIdenticallyNamedStatements(t *testing.T) {
 	// One backend, so both clients are guaranteed to share it.
-	url := cachingURL(startProxy(t, pooling.Config{MaxConns: 1}))
+	url := startProxy(t, pooling.Config{MaxConns: 1})
 
 	first := connect(t, url)
 	second := connect(t, url)
 
 	// The same name, deliberately, for different SQL.
-	if _, err := first.Prepare(t.Context(), "shared", "SELECT 111"); err != nil {
-		t.Fatalf("first Prepare() = %v", err)
+	if err := first.prepare("shared", "SELECT 111"); err != nil {
+		t.Fatalf("first prepare = %v", err)
 	}
-	if _, err := second.Prepare(t.Context(), "shared", "SELECT 222"); err != nil {
-		t.Fatalf("second Prepare() = %v", err)
+	if err := second.prepare("shared", "SELECT 222"); err != nil {
+		t.Fatalf("second prepare = %v", err)
 	}
 
 	// Interleaved, so each turn lands on a backend the other one last used.
 	for range 10 {
-		var got int
-		if err := first.QueryRow(t.Context(), "shared").Scan(&got); err != nil {
+		rows, err := first.execute("shared")
+		if err != nil {
 			t.Fatalf("first query = %v", err)
 		}
-		if got != 111 {
-			t.Fatalf("first client got %d, want 111 — it ran the other client's statement", got)
+		if got, _ := single(rows); got != "111" {
+			t.Fatalf("first client got %q, want 111 — it ran the other client's statement", got)
 		}
 
-		if err := second.QueryRow(t.Context(), "shared").Scan(&got); err != nil {
+		rows, err = second.execute("shared")
+		if err != nil {
 			t.Fatalf("second query = %v", err)
 		}
-		if got != 222 {
-			t.Fatalf("second client got %d, want 222 — it ran the other client's statement", got)
+		if got, _ := single(rows); got != "222" {
+			t.Fatalf("second client got %q, want 222 — it ran the other client's statement", got)
 		}
 	}
 }
@@ -463,28 +442,36 @@ func TestProxyIsolatesIdenticallyNamedStatements(t *testing.T) {
 // Deallocating a statement has to reach the backend and be forgotten on both
 // sides, or a later client inherits a name the proxy believes is prepared.
 func TestProxyForgetsClosedStatements(t *testing.T) {
-	url := cachingURL(startProxy(t, pooling.Config{MaxConns: 1}))
-	conn := connect(t, url)
+	conn := connect(t, startProxy(t, pooling.Config{MaxConns: 1}))
 
-	if _, err := conn.Prepare(t.Context(), "temporary", "SELECT 7"); err != nil {
-		t.Fatalf("Prepare() = %v", err)
-	}
-	var got int
-	if err := conn.QueryRow(t.Context(), "temporary").Scan(&got); err != nil || got != 7 {
-		t.Fatalf("prepared query = %d, %v", got, err)
+	answer := func() string {
+		t.Helper()
+		rows, err := conn.execute("temporary")
+		if err != nil {
+			t.Fatalf("prepared query = %v", err)
+		}
+		got, _ := single(rows)
+		return got
 	}
 
-	if err := conn.Deallocate(t.Context(), "temporary"); err != nil {
-		t.Fatalf("Deallocate() = %v", err)
+	if err := conn.prepare("temporary", "SELECT 7"); err != nil {
+		t.Fatalf("prepare = %v", err)
+	}
+	if got := answer(); got != "7" {
+		t.Fatalf("prepared query = %q, want 7", got)
+	}
+
+	if err := conn.deallocate("temporary"); err != nil {
+		t.Fatalf("deallocate = %v", err)
 	}
 
 	// Re-preparing the same name with different SQL must take effect rather than
 	// resurrect what was deallocated.
-	if _, err := conn.Prepare(t.Context(), "temporary", "SELECT 8"); err != nil {
-		t.Fatalf("second Prepare() = %v", err)
+	if err := conn.prepare("temporary", "SELECT 8"); err != nil {
+		t.Fatalf("second prepare = %v", err)
 	}
-	if err := conn.QueryRow(t.Context(), "temporary").Scan(&got); err != nil || got != 8 {
-		t.Fatalf("after re-preparing = %d, %v; the old statement survived", got, err)
+	if got := answer(); got != "8" {
+		t.Fatalf("after re-preparing = %q, want 8; the old statement survived", got)
 	}
 }
 
@@ -498,24 +485,25 @@ func TestProxyForgetsClosedStatements(t *testing.T) {
 // reporting what it is really holding.
 func TestProxyBoundsPreparedStatementsOnTheServer(t *testing.T) {
 	const limit = 8
-	conn := connect(t, cachingURL(startProxyLimited(t, pooling.Config{MaxConns: 1}, limit)))
+	conn := connect(t, startProxyLimited(t, pooling.Config{MaxConns: 1}, limit)).caching()
 
-	// Distinct SQL every time, so pgx names and prepares a new statement for each
-	// rather than binding one it has already cached.
+	// Distinct SQL every time, so the client names and prepares a new statement
+	// for each rather than binding one it has already cached.
 	for i := range 60 {
-		var answer int
 		sql := fmt.Sprintf("SELECT %d::int + $1::int", i)
-		if err := conn.QueryRow(context.Background(), sql, 1).Scan(&answer); err != nil {
+		if _, err := conn.number(sql, 1); err != nil {
 			t.Fatalf("query %d = %v", i, err)
 		}
 	}
 
-	// Asked through the unnamed statement, which the proxy deliberately never
-	// remembers, so counting does not itself add to the count.
-	var held int
-	err := conn.QueryRow(context.Background(),
-		"SELECT count(*)::int FROM pg_prepared_statements",
-		pgx.QueryExecModeExec).Scan(&held)
+	// Asked over the simple protocol, which prepares nothing, so counting does
+	// not itself add to the count.
+	rows, err := conn.simple("SELECT count(*)::int FROM pg_prepared_statements")
+	if err != nil {
+		t.Fatalf("counting prepared statements = %v", err)
+	}
+	text, _ := single(rows)
+	held, err := strconv.Atoi(text)
 	if err != nil {
 		t.Fatalf("counting prepared statements = %v", err)
 	}
@@ -538,20 +526,21 @@ func TestProxyBoundsPreparedStatementsOnTheServer(t *testing.T) {
 // Six clients hold three statements each against a limit of eight, so the shared
 // backends evict continuously while no client ever exceeds its own share.
 func TestProxyEvictionIsTransparentWithinTheLimit(t *testing.T) {
-	url := cachingURL(startProxyLimited(t, pooling.Config{MaxConns: 2}, 8))
+	url := startProxyLimited(t, pooling.Config{MaxConns: 2}, 8)
 
 	var wg sync.WaitGroup
 	var failures atomic.Int64
 
 	for client := range 6 {
 		wg.Go(func() {
-			conn, err := pgx.Connect(context.Background(), url)
+			conn, err := dialClient(context.Background(), url)
 			if err != nil {
 				t.Errorf("client %d connect = %v", client, err)
 				failures.Add(1)
 				return
 			}
-			defer conn.Close(context.Background())
+			defer conn.close()
+			conn.caching()
 
 			for i := range 40 {
 				// The constant identifies the statement, and the argument the
@@ -560,8 +549,8 @@ func TestProxyEvictionIsTransparentWithinTheLimit(t *testing.T) {
 				constant := client*3 + i%3
 				sql := fmt.Sprintf("SELECT %d::int + $1::int", constant)
 
-				var answer int
-				if err := conn.QueryRow(context.Background(), sql, i).Scan(&answer); err != nil {
+				answer, err := conn.number(sql, i)
+				if err != nil {
 					t.Errorf("client %d query %d = %v", client, i, err)
 					failures.Add(1)
 					return
@@ -584,9 +573,9 @@ func TestProxyEvictionIsTransparentWithinTheLimit(t *testing.T) {
 // A client is told the server's settings during startup, and they are captured
 // from a real backend rather than invented — so until the pool has opened one
 // there is nothing to tell. The first client to connect used to be handed an
-// empty set: pgx survives that on the extended protocol and refuses the simple
-// protocol without standard_conforming_strings, and another client library is
-// entitled to do worse.
+// empty set: one widely used client library survives that on the extended
+// protocol and refuses the simple protocol without standard_conforming_strings,
+// and another is entitled to do worse.
 //
 // This connects before anything has run a query, which is the only moment the
 // defect was reachable.
@@ -594,18 +583,41 @@ func TestProxyReportsServerParametersToItsFirstClient(t *testing.T) {
 	conn := connect(t, startProxy(t, pooling.Config{MaxConns: 2}))
 
 	for _, name := range []string{"standard_conforming_strings", "server_version", "client_encoding"} {
-		if value := conn.PgConn().ParameterStatus(name); value == "" {
-			t.Errorf("ParameterStatus(%q) is empty; the client was told nothing about the server", name)
+		if value := conn.login.statuses[name]; value == "" {
+			t.Errorf("the %s setting is empty; the client was told nothing about the server", name)
 		}
 	}
 
-	// The simple protocol is what refused to run at all without them, so it is
-	// the honest end-to-end check rather than reading the values back.
-	var answer int
-	if err := conn.QueryRow(t.Context(), "SELECT 1", pgx.QueryExecModeSimpleProtocol).Scan(&answer); err != nil {
+	rows, err := conn.simple("SELECT 1")
+	if err != nil {
 		t.Fatalf("simple protocol query = %v", err)
 	}
-	if answer != 1 {
-		t.Errorf("answer = %d, want 1", answer)
+	if answer, _ := single(rows); answer != "1" {
+		t.Errorf("answer = %q, want 1", answer)
+	}
+}
+
+// A client asking for protocol 3.2, as one does for PostgreSQL 18, is offered
+// 3.0 the way a server older than 18 offers it, with the protocol options it
+// sent named as not recognised, and then logs in. The proxy used to refuse the
+// packet outright, which cost such a client a second dial.
+func TestProxyOffers30ToAClientAsking32(t *testing.T) {
+	url := startProxy(t, pooling.Config{MaxConns: 1})
+	target, err := parseUpstream(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := target.connectAsking(t.Context(), protocolVersion32, [2]string{"_pq_.something", "on"})
+	if err != nil {
+		t.Fatalf("logging in asking for 3.2 = %v", err)
+	}
+	defer session.conn.Close()
+	want := []byte{0, 0, 0, 0, 0, 0, 0, 1}
+	want = append(want, "_pq_.something\x00"...)
+	if !bytes.Equal(session.offered, want) {
+		t.Fatalf("NegotiateProtocolVersion = %q, want 3.0 and the option named", session.offered)
+	}
+	if len(session.secret) != 4 {
+		t.Fatalf("a %d-byte cancel key in protocol 3.0", len(session.secret))
 	}
 }

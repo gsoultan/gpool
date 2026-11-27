@@ -14,11 +14,11 @@ import (
 	"testing"
 )
 
-// scramClient is the client half of SCRAM-SHA-256, written out so the server
+// referenceClient is the client half of SCRAM-SHA-256, written out so the server
 // half is tested against an independent implementation rather than against
 // itself. A round trip through the same code proves only that it is
 // self-consistent.
-type scramClient struct {
+type referenceClient struct {
 	password  string
 	gs2Header string
 	nonce     string
@@ -27,12 +27,12 @@ type scramClient struct {
 	serverFirst string
 }
 
-func (c *scramClient) first() []byte {
+func (c *referenceClient) first() []byte {
 	c.firstBare = "n=,r=" + c.nonce
 	return []byte(c.gs2Header + c.firstBare)
 }
 
-func (c *scramClient) final(serverFirst []byte) ([]byte, error) {
+func (c *referenceClient) final(serverFirst []byte) ([]byte, error) {
 	c.serverFirst = string(serverFirst)
 
 	salt, iterations, err := parseServerFirst(c.serverFirst)
@@ -64,7 +64,7 @@ func (c *scramClient) final(serverFirst []byte) ([]byte, error) {
 
 // verifyServer checks the server proved it holds the verifier, which is the half
 // of SCRAM that stops anything listening on a port from impersonating the pool.
-func (c *scramClient) verifyServer(final []byte, password string) error {
+func (c *referenceClient) verifyServer(final []byte, password string) error {
 	salt, iterations, err := parseServerFirst(c.serverFirst)
 	if err != nil {
 		return err
@@ -102,7 +102,7 @@ func parseServerFirst(message string) ([]byte, int, error) {
 	return salt, iterations, err
 }
 
-func exchange(t *testing.T, server *scramServer, client *scramClient) error {
+func exchange(t *testing.T, server *scramServer, client *referenceClient) error {
 	t.Helper()
 
 	challenge, err := server.challenge(client.first())
@@ -132,7 +132,7 @@ func TestSCRAMAcceptsTheRightPassword(t *testing.T) {
 		t.Run(fmt.Sprintf("gs2=%q", header), func(t *testing.T) {
 			err := exchange(t,
 				&scramServer{verifier: credential},
-				&scramClient{password: password, gs2Header: header, nonce: "clientnonce123"})
+				&referenceClient{password: password, gs2Header: header, nonce: "clientnonce123"})
 			if err != nil {
 				t.Fatalf("authentication should succeed: %v", err)
 			}
@@ -148,7 +148,7 @@ func TestSCRAMRejectsTheWrongPassword(t *testing.T) {
 
 	err = exchange(t,
 		&scramServer{verifier: credential},
-		&scramClient{password: "wrong", gs2Header: "n,,", nonce: "clientnonce123"})
+		&referenceClient{password: "wrong", gs2Header: "n,,", nonce: "clientnonce123"})
 	if !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("err = %v, want ErrAuthFailed", err)
 	}
@@ -189,7 +189,7 @@ func TestSCRAMRejectsAlteredChannelBinding(t *testing.T) {
 	}
 
 	server := &scramServer{verifier: credential}
-	client := &scramClient{password: "pw", gs2Header: "n,,", nonce: "abc"}
+	client := &referenceClient{password: "pw", gs2Header: "n,,", nonce: "abc"}
 
 	challenge, err := server.challenge(client.first())
 	if err != nil {

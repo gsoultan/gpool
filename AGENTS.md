@@ -21,8 +21,8 @@ These outrank convenience. Every profile enforces them.
 3. **Never recycle an object whose lifetime user code controls.** If it escapes to
    the caller, it is not poolable. A second release from one goroutine would hand a
    live resource to another.
-4. **One goroutine owns a connection.** `pgconn.PgConn`'s busy check is a debug
-   assertion, not a lock.
+4. **One goroutine owns a connection.** `wire.Conn` has no lock, and a session's
+   busy flag is bookkeeping, not mutual exclusion.
 5. **A caller-owned map or slice is allocated fresh.** No pooled maps in events.
 6. **Confirm work only after it is done.** CDC positions advance after the consumer's
    loop body returns, never before.
@@ -48,7 +48,9 @@ These outrank convenience. Every profile enforces them.
   `BenchmarkGpoolAcquireRelease` is 1 alloc / ~320ns; a query is ~50µs.
 
 **Checklist:** `gofmt` clean · `go vet` clean · exported symbols documented · no new
-dependency without justification (currently pgx/v5 and pglogrepl, nothing else).
+dependency without justification (the core module requires only caduceus, the
+author's own pure-Go PostgreSQL driver, which itself requires nothing; pgx and
+pglogrepl appear only in `benchmarks/`, as what gpool is measured against).
 
 ---
 
@@ -74,6 +76,13 @@ dependency without justification (currently pgx/v5 and pglogrepl, nothing else).
   `pkg/pooling` is the engine, `pkg/sqldriver` is stdlib-only and serves every
   `database/sql` driver. A new `database/sql` vendor should be about a hundred
   lines — if it is more, something belongs in `pkg/sqldriver` instead.
+- **The PostgreSQL protocol lives in caduceus** (`github.com/gsoultan/caduceus`):
+  `wire`, `codec`, `replication`, and the `Conn` that runs queries. gpool's
+  PostgreSQL vendors are adapters over it and hold only what pooling needs:
+  liveness, reset, the `gpool` interfaces. A protocol or decoding fix goes to
+  caduceus, then gpool bumps the version. caduceus must stay free of
+  `database/sql`, pgx and pglogrepl, which are its competitors; gpool bridges
+  `driver.Valuer` arguments itself (`bindable`).
 - Several databases means several pools, registered by name on the `Engine`, sharing
   nothing. Never multiplex databases through one pool: separate capacity is what
   keeps one saturated backend from starving the rest.
@@ -119,8 +128,9 @@ including errors? · what does this cost × `MaxConns`?
 - Every network operation is bounded. No `context.Background()` without a timeout.
 - Teardown uses `context.WithoutCancel` or a fresh context so a cancelled request
   still gets a graceful terminate.
-- Parse the connection string once and clone the config per connection. `pgx.Connect`
-  re-parses env, service files, and `~/.pgpass` every call.
+- Parse the connection string once and clone the config per connection.
+  `wire.ParseConfig` reads the environment and the password file, which a dial
+  per connection would repeat.
 - Bound connection lifetime. `MaxConnLifetime` is what recovers the pool after a
   failover or a DNS change; a pool without it serves a dead server forever.
 - Health-gate the return path. A connection that is closed, expired, or failed its
@@ -140,11 +150,15 @@ control path?
 **Owns:** SQL correctness, PostgreSQL semantics, replication, pooling modes.
 
 - Identifiers are quoted, and schema-qualified names are split first.
-  `quoteIdentifier("public.users")` names a table *called* `public.users`.
+  `caduceus.QuoteIdentifier("public.users")` names a table *called* `public.users`.
 - Values are bound as parameters. String interpolation is only for identifiers and
-  for literals that go through `quoteLiteral`.
+  for literals that go through `caduceus.QuoteLiteral`, or `replication.QuoteLiteral` in a
+  replication command, whose grammar refuses the `E'...'` form SQL accepts.
+- What caduceus already provides is used, not rewritten here: quoting, command
+  tags, LSNs, standby status, the walsender commands (`replication.CreateReplicationSlot`,
+  `DropReplicationSlot`, `StartReplication`, `PgoutputOptions`). A helper of the same meaning in two places drifts.
 - Slot names reach the replication command unquoted, so the character set is
-  validated up front (`slotNamePattern`).
+  validated up front (`replication.ValidSlotName`).
 - Catalog errors are classified by SQLSTATE (`42710`, `42704`), never by message.
 - **Replication slots retain WAL.** A position that stops advancing fills the
   primary's disk. Idle keepalives must carry the confirmed position forward
@@ -178,7 +192,7 @@ round-trip cost per call?
 **Owns:** the test suite, reproducibility, regression coverage.
 
 - TDD: write the failing test that names the defect before the fix.
-- Table-driven tests. Mock the interface (`pgx.Rows`, `pgx.Tx`), never the concrete type.
+- Table-driven tests. Mock the interface (`resultSet`, `transaction`), never the concrete type.
 - Every bug fixed gets a regression test whose comment says what used to go wrong.
   That comment is the test's real payload.
 - Unit tests run with no database. Integration tests live in `integration/` and skip
@@ -215,8 +229,9 @@ both sides of a comparison configured the same?
 
 **Owns:** injection surfaces, credential handling, denial-of-service resistance.
 
-- **Injection:** every identifier through `quoteIdentifier`/`quoteQualifiedName`,
-  every literal through `quoteLiteral`, every value as a bound parameter. Anything
+- **Injection:** every identifier through `caduceus.QuoteIdentifier`/`quoteQualifiedName`,
+  every literal through `caduceus.QuoteLiteral` (`replication.QuoteLiteral` in a replication
+  command), every value as a bound parameter. Anything
   interpolated raw (slot names) is validated against an allowlist pattern.
 - **Do not weaken parameter binding for speed.** `QueryExecModeExec` still binds
   server-side; `QueryExecModeSimpleProtocol` interpolates client-side and must not

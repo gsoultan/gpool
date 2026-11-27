@@ -16,7 +16,7 @@ import (
 //
 // Capacity, lock-striped idle buckets, the reaper, lifecycle, and statistics come
 // from pkg/pooling, which every vendor shares. What lives here is what is actually
-// specific to PostgreSQL: how to dial pgx, how to tell a connection is dead, and
+// specific to PostgreSQL: how to dial, how to tell a connection is dead, and
 // how to return one to a clean state.
 type Postgres struct {
 	core *pooling.Core[*pgConn]
@@ -34,12 +34,12 @@ func New(config Config) (*Postgres, error) {
 	}
 	config = config.withDefaults()
 
-	connConfig, err := config.parse()
+	settings, err := config.parse()
 	if err != nil {
 		return nil, err
 	}
 
-	core, err := pooling.New[*pgConn](&pgxDriver{config: config, connConfig: connConfig}, config.pooling())
+	core, err := pooling.New[*pgConn](&wireDriver{config: config, settings: settings}, config.pooling())
 	if err != nil {
 		return nil, err
 	}
@@ -112,12 +112,12 @@ func (p *Postgres) Query(ctx context.Context, sql string, args ...any) (gpool.Ro
 		return nil, err
 	}
 
-	rows, err := conn.conn().conn.Query(ctx, sql, args...)
+	rows, err := conn.conn().query(ctx, sql, args, conn)
 	if err != nil {
 		conn.Release()
 		return nil, err
 	}
-	return newRows(rows, conn), nil
+	return rows, nil
 }
 
 // QueryRow acquires a connection and runs the query. The connection is released by
@@ -129,13 +129,7 @@ func (p *Postgres) QueryRow(ctx context.Context, sql string, args ...any) gpool.
 		return errorRow{err: err}
 	}
 
-	rows, err := conn.conn().conn.Query(ctx, sql, args...)
-	if err != nil {
-		closeRows(rows)
-		conn.Release()
-		return errorRow{err: err}
-	}
-	return newRow(rows, conn)
+	return conn.conn().queryRow(ctx, sql, args, conn)
 }
 
 // translate maps the engine's sentinel errors onto this package's, so callers

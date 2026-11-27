@@ -253,6 +253,38 @@ func (c *Core[C]) Acquire(ctx context.Context) (Handle[C], error) {
 	return Handle[C]{core: c, idle: ic, conn: ic.conn, shardIdx: idx}, nil
 }
 
+// TryAcquire checks out an idle connection if one can be had without waiting,
+// and reports whether it did. The caller must Release the handle it is given.
+//
+// It never blocks on a permit and never dials, so a miss means only "not right
+// now": the pool may be at its ceiling with everything checked out, or it may
+// have room to grow, which only Acquire will use. It exists for callers that
+// cannot park — an event loop serving thousands of sockets on one thread has to
+// keep serving them while it waits, so it tries here and queues the request
+// itself on a miss.
+//
+// A dead or expired connection met on the way is destroyed, exactly as Acquire
+// would, so a driver's Close must stay bounded.
+func (c *Core[C]) TryAcquire() (Handle[C], bool) {
+	if c.closed.Load() || !c.permits.tryAcquire() {
+		return Handle[C]{}, false
+	}
+	// Close may have landed between the check and the permit.
+	if c.closed.Load() {
+		c.permits.release()
+		return Handle[C]{}, false
+	}
+
+	ic, idx, ok := c.popIdle()
+	if !ok {
+		c.permits.release()
+		return Handle[C]{}, false
+	}
+	c.acquireCount.Add(1)
+	c.checkedOut.Add(1)
+	return Handle[C]{core: c, idle: ic, conn: ic.conn, shardIdx: idx}, true
+}
+
 // take returns a connection for a caller that already holds a permit, either by
 // reusing an idle one or by establishing a new one.
 //

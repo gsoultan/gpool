@@ -118,7 +118,7 @@ func TestConfigReachesTheEngine(t *testing.T) {
 func TestDriverDeadHandlesMissingConnection(t *testing.T) {
 	t.Parallel()
 
-	driver := &pgxDriver{}
+	driver := &wireDriver{}
 
 	if !driver.Dead(nil) {
 		t.Error("Dead(nil) = false, want true")

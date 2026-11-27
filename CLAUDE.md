@@ -13,8 +13,8 @@ a metrics server, or any process-global state, it does not belong here.
 | :--- | :--- |
 | `pkg/gpool` | `Pool`, `Conn`, `Tx`, `Rows`, `Row`, `Result`, `Stat`, `Engine`, vendor registry |
 | `pkg/gpool/cdc` | `Subscriber`, `Stream`, `TableManager`, `ReplicationManager`, `EventStream`, `Event` |
-| `pkg/vendors/postgres/pool` | PostgreSQL pool (`pgx/v5`) |
-| `pkg/vendors/postgres/cdc` | PostgreSQL logical replication (`pglogrepl`) |
+| `pkg/vendors/postgres/pool` | PostgreSQL pool, on the caduceus driver |
+| `pkg/vendors/postgres/cdc` | PostgreSQL logical replication, on `caduceus/replication` |
 | `integration/` | Tests against a real server, skipped unless `DATABASE_URL` is set |
 | `benchmarks/` | gpool vs `pgxpool` vs `database/sql` vs PgBouncer |
 

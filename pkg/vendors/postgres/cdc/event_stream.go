@@ -4,15 +4,15 @@ package cdc
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gsoultan/caduceus/replication"
+	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	"github.com/jackc/pglogrepl"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // statusTimeout bounds a single standby status update.
@@ -22,15 +22,15 @@ const statusTimeout = 5 * time.Second
 //
 // One goroutine owns the connection for the stream's whole life: it reads WAL,
 // decodes it, and sends every standby status update. Nothing else touches the
-// connection, because pgconn.PgConn is not safe for concurrent use and its internal
-// busy check is a debug assertion rather than a lock.
+// connection, because a connection is a single stream of bytes in each direction
+// and has no lock of its own.
 //
 // Decoding is decoupled from consumption by a buffered channel so a slow consumer
 // cannot stall the keepalives. The reader keeps confirming its position even while
 // blocked handing an event over, which is what stops the server from dropping the
 // connection on wal_sender_timeout.
 type pgEventStream struct {
-	conn     *pgconn.PgConn
+	conn     *wire.Conn
 	ctx      context.Context
 	cancel   context.CancelFunc
 	events   chan pendingEvent
@@ -69,7 +69,7 @@ var _ cdc.EventStream = (*pgEventStream)(nil)
 // PostgreSQL retains WAL behind an unconfirmed position, so a consumer that
 // stops draining this stream grows the primary's disk rather than losing data —
 // the opposite of the failure mode on a source with an expiring log.
-func newEventStream(parent context.Context, conn *pgconn.PgConn, config Config, onClose func()) *pgEventStream {
+func newEventStream(parent context.Context, conn *wire.Conn, config Config, onClose func()) *pgEventStream {
 	// The stream outlives the call that created it, so it is detached from the
 	// caller's context: cancelling Subscribe's context must not tear down a stream
 	// that is already handed over. Close is the way to stop it.
@@ -150,10 +150,15 @@ func (s *pgEventStream) run() {
 	defer s.sendFinalStatus()
 	defer close(s.events)
 
-	relations := make(map[uint32]*pglogrepl.RelationMessage)
-	// pgoutput sends the transaction's commit LSN and commit time once, in the
-	// Begin that opens it, and every change in that transaction carries both.
-	var current transaction
+	// Close interrupts a blocked read by moving the read deadline into the past.
+	// Only the read side: the final status update still has to be written.
+	netConn := s.conn.NetConn()
+	stop := context.AfterFunc(s.ctx, func() { _ = netConn.SetReadDeadline(time.Unix(1, 0)) })
+	defer stop()
+
+	// The decoder remembers the Relation messages that name each table's
+	// columns, and the Begin whose commit LSN and time every change carries.
+	decoder := replication.NewDecoder()
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
@@ -168,57 +173,79 @@ func (s *pgEventStream) run() {
 		default:
 		}
 
-		msg, err := s.receive()
+		data, err := s.receive()
 		if err != nil {
 			if s.ctx.Err() != nil {
 				return
 			}
-			if pgconn.Timeout(err) {
+			if wire.IsTimeout(err) {
 				continue
 			}
 			s.setErr(err)
 			return
 		}
-
-		copyData, ok := msg.(*pgproto3.CopyData)
-		if !ok || len(copyData.Data) == 0 {
+		if len(data) == 0 {
 			continue
 		}
 
-		switch copyData.Data[0] {
-		case pglogrepl.PrimaryKeepaliveMessageByteID:
-			if !s.handleKeepalive(copyData.Data[1:]) {
+		switch data[0] {
+		case replication.PrimaryKeepalive:
+			if !s.handleKeepalive(data) {
 				return
 			}
-		case pglogrepl.XLogDataByteID:
-			if !s.handleXLogData(copyData.Data[1:], relations, &current, ticker) {
+		case replication.XLogData:
+			if !s.handleXLogData(data, decoder, ticker) {
 				return
 			}
 		}
 	}
 }
 
-// receive reads one message, bounded so the loop returns to check the keepalive
-// ticker even on a silent connection.
-func (s *pgEventStream) receive() (pgproto3.BackendMessage, error) {
-	ctx, cancel := context.WithTimeout(s.ctx, s.interval)
-	defer cancel()
-	return s.conn.ReceiveMessage(ctx)
+// errStreamEnded is a server that ended the copy, which it does only when the
+// walsender is shutting down.
+var errStreamEnded = errors.New("gpool/postgres/cdc: the server ended the replication stream")
+
+// receive reads the next CopyData payload, bounded so the loop returns to check
+// the keepalive ticker even on a silent connection. A read that times out
+// leaves the connection intact. The payload aliases the connection's buffer
+// until the next read.
+func (s *pgEventStream) receive() ([]byte, error) {
+	if err := s.conn.NetConn().SetReadDeadline(time.Now().Add(s.interval)); err != nil {
+		return nil, err
+	}
+	if s.ctx.Err() != nil {
+		// Close may have moved the deadline into the past just before it was
+		// moved forward again above.
+		return nil, s.ctx.Err()
+	}
+	kind, body, err := s.conn.Receive()
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
+	case wire.MsgCopyData:
+		return body, nil
+	case wire.MsgErrorResponse:
+		return nil, wire.ParseError(body)
+	case wire.MsgCopyDone:
+		return nil, errStreamEnded
+	}
+	return nil, nil
 }
 
 // handleKeepalive processes a server keepalive. It reports whether to keep running.
 func (s *pgEventStream) handleKeepalive(data []byte) bool {
-	pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(data)
+	keepalive, err := replication.ParseKeepalive(data)
 	if err != nil {
 		s.setErr(err)
 		return false
 	}
+	serverEnd := uint64(keepalive.ServerEnd)
 
-	serverEnd := uint64(pkm.ServerWALEnd)
 	advance(&s.received, serverEnd)
 	s.catchUp(serverEnd)
 
-	if pkm.ReplyRequested {
+	if keepalive.ReplyRequested {
 		return s.sendStatus()
 	}
 	return true
@@ -226,59 +253,63 @@ func (s *pgEventStream) handleKeepalive(data []byte) bool {
 
 // handleXLogData decodes one WAL record and, when it yields an event, delivers it.
 // It reports whether to keep running.
-func (s *pgEventStream) handleXLogData(data []byte, relations map[uint32]*pglogrepl.RelationMessage, current *transaction, ticker *time.Ticker) bool {
-	xld, err := pglogrepl.ParseXLogData(data)
+func (s *pgEventStream) handleXLogData(data []byte, decoder *replication.Decoder, ticker *time.Ticker) bool {
+	record, err := replication.ParseXLogData(data)
 	if err != nil {
 		s.setErr(err)
 		return false
 	}
-
-	end := uint64(xld.WALStart) + uint64(len(xld.WALData))
+	end := uint64(record.End())
 	advance(&s.received, end)
 
-	logical, err := pglogrepl.Parse(xld.WALData)
+	pending, ok, err := decodeRecord(record.Data, decoder, end)
 	if err != nil {
 		s.setErr(err)
 		return false
 	}
-
-	switch m := logical.(type) {
-	case *pglogrepl.BeginMessage:
-		*current = transaction{position: position(uint64(m.FinalLSN)), committed: m.CommitTime}
-		return true
-
-	case *pglogrepl.RelationMessage:
-		// Relation metadata arrives once per table per session and is required to
-		// name the columns of every later row for that relation.
-		relations[m.RelationID] = m
-		return true
-
-	case *pglogrepl.InsertMessage:
-		rel, ok := relations[m.RelationID]
-		if !ok {
-			return true
-		}
-		return s.emit(pendingEvent{event: decodeInsert(rel, m, end, *current), lsn: end}, ticker)
-
-	case *pglogrepl.UpdateMessage:
-		rel, ok := relations[m.RelationID]
-		if !ok {
-			return true
-		}
-		return s.emit(pendingEvent{event: decodeUpdate(rel, m, end, *current), lsn: end}, ticker)
-
-	case *pglogrepl.DeleteMessage:
-		rel, ok := relations[m.RelationID]
-		if !ok {
-			return true
-		}
-		return s.emit(pendingEvent{event: decodeDelete(rel, m, end, *current), lsn: end}, ticker)
-
-	default:
-		// COMMIT, ORIGIN, TYPE, TRUNCATE and friends carry no row change.
-		// Their positions are confirmed by catchUp once the pipeline drains.
+	if !ok {
 		return true
 	}
+	return s.emit(pending, ticker)
+}
+
+// decodeRecord decodes one pgoutput message. It reports whether the message was
+// a row change, which is the only kind that becomes an event; Begin and
+// Relation update the decoder's state, and COMMIT, ORIGIN, TYPE, TRUNCATE and
+// friends carry no row change. Their positions are confirmed by catchUp once
+// the pipeline drains.
+func decodeRecord(record []byte, decoder *replication.Decoder, end uint64) (pendingEvent, bool, error) {
+	change, ok, err := decoder.Decode(record)
+	if err != nil || !ok {
+		return pendingEvent{}, false, err
+	}
+	return pendingEvent{event: toEvent(change, end), lsn: end}, true, nil
+}
+
+// toEvent is a decoded change as a cdc.Event. Position is the end of the
+// change's own record; Transaction is its transaction's commit LSN, the same
+// for every change in it.
+func toEvent(change replication.Change, end uint64) cdc.Event {
+	return cdc.Event{
+		Op:          toOp(change.Op),
+		Schema:      change.Relation.Namespace,
+		Table:       change.Relation.Name,
+		Before:      change.Before,
+		After:       change.After,
+		Position:    position(end),
+		Timestamp:   change.Transaction.Committed,
+		Transaction: position(uint64(change.Transaction.FinalLSN)),
+	}
+}
+
+func toOp(op replication.Op) cdc.Op {
+	switch op {
+	case replication.Insert:
+		return cdc.OpInsert
+	case replication.Update:
+		return cdc.OpUpdate
+	}
+	return cdc.OpDelete
 }
 
 // emit hands an event to the consumer, continuing to confirm the stream's position
@@ -355,11 +386,18 @@ func (s *pgEventStream) writeStatus(ctx context.Context) error {
 	// Never confirm past what was actually received, whatever the counters say.
 	flushed := min(s.flushed.Load(), received)
 
-	return pglogrepl.SendStandbyStatusUpdate(ctx, s.conn, pglogrepl.StandbyStatusUpdate{
-		WALWritePosition: pglogrepl.LSN(received),
-		WALFlushPosition: pglogrepl.LSN(flushed),
-		WALApplyPosition: pglogrepl.LSN(flushed),
-	})
+	deadline := time.Now().Add(statusTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := s.conn.NetConn().SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	return s.conn.Send(replication.AppendStandbyStatusUpdate(s.conn.Buffer(), replication.StandbyStatusUpdate{
+		WALWritePosition: replication.LSN(received),
+		WALFlushPosition: replication.LSN(flushed),
+		WALApplyPosition: replication.LSN(flushed),
+	}))
 }
 
 // setErr records the first error to terminate the stream.

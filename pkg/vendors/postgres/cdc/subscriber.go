@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gsoultan/caduceus/replication"
+	"github.com/gsoultan/caduceus/wire"
 	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	"github.com/jackc/pglogrepl"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
@@ -34,14 +34,14 @@ const (
 // connection owned by the stream.
 //
 // They cannot be shared: after START_REPLICATION the walsender connection is in
-// CopyBoth mode, where an ordinary query is protocol-illegal, and pgconn.PgConn is
+// CopyBoth mode, where an ordinary query is protocol-illegal, and a connection is
 // not safe for concurrent use in the first place. Running table management against
 // the streaming connection corrupts the replication protocol.
 type Postgres struct {
 	config Config
 
 	mu        sync.Mutex
-	ctrl      *pgconn.PgConn
+	ctrl      *wire.Conn
 	stream    *pgEventStream
 	closed    bool
 	streaming bool
@@ -156,18 +156,13 @@ func (p *Postgres) slotConfirmed(ctx context.Context) (uint64, bool, error) {
 		return 0, false, err
 	}
 
-	result := conn.ExecParams(ctx, slotConfirmedSQL, [][]byte{[]byte(p.config.SlotName)}, nil, nil, nil)
-
-	var text string
-	if result.NextRow() {
-		// Values are only valid until the next NextRow, so this copies rather
-		// than aliasing the reader's buffer.
-		if values := result.Values(); len(values) > 0 && values[0] != nil {
-			text = string(values[0])
-		}
-	}
-	if _, err := result.Close(); err != nil {
+	result, err := conn.QueryText(ctx, slotConfirmedSQL, p.config.SlotName)
+	if err != nil {
 		return 0, false, fmt.Errorf("gpool/postgres/cdc: reading slot %q: %w", p.config.SlotName, err)
+	}
+	var text string
+	if len(result.Rows) > 0 && len(result.Rows[0]) > 0 && result.Rows[0][0] != nil {
+		text = string(result.Rows[0][0])
 	}
 	if text == "" {
 		return 0, false, nil
@@ -190,21 +185,20 @@ func (p *Postgres) releaseStream() {
 }
 
 // startReplication issues START_REPLICATION for the configured slot.
-func (p *Postgres) startReplication(ctx context.Context, conn *pgconn.PgConn, start uint64) error {
+func (p *Postgres) startReplication(ctx context.Context, conn *wire.Conn, start uint64) error {
 	// A zero start position tells the server to resume from the slot's
 	// confirmed_flush_lsn. Starting from the server's current WAL head instead
 	// would discard everything the slot retained while this consumer was away,
 	// which is the whole point of holding a slot.
-	startLSN := pglogrepl.LSN(start)
-
-	options := pglogrepl.StartReplicationOptions{
-		PluginArgs: []string{
-			fmt.Sprintf("proto_version '%d'", protoVersion),
-			fmt.Sprintf("publication_names %s", quoteLiteral(p.config.PublicationName)),
-		},
-	}
-
-	if err := pglogrepl.StartReplication(ctx, conn, p.config.SlotName, startLSN, options); err != nil {
+	//
+	// The slot name is interpolated bare, as the replication grammar requires;
+	// caduceus checks it, and quotes the publication name in the replication
+	// grammar, which reads a backslash as itself.
+	options := replication.StartOptions{PluginArgs: replication.PgoutputOptions{
+		ProtoVersion: protoVersion,
+		Publications: []string{p.config.PublicationName},
+	}.Args()}
+	if err := replication.StartReplication(ctx, conn, p.config.SlotName, replication.LSN(start), options); err != nil {
 		return fmt.Errorf("gpool/postgres/cdc: starting replication on slot %q: %w", p.config.SlotName, err)
 	}
 	return nil
@@ -330,18 +324,11 @@ func (p *Postgres) VerifyTable(ctx context.Context, table string) (bool, error) 
 	}
 
 	schema, name := splitQualifiedName(table)
-	params := [][]byte{
-		[]byte(p.config.PublicationName),
-		[]byte(schema),
-		[]byte(name),
-	}
-
-	result := conn.ExecParams(ctx, verifyTableSQL, params, nil, nil, nil)
-	found := result.NextRow()
-	if _, err := result.Close(); err != nil {
+	result, err := conn.QueryText(ctx, verifyTableSQL, p.config.PublicationName, schema, name)
+	if err != nil {
 		return false, fmt.Errorf("gpool/postgres/cdc: verifying table %q: %w", table, err)
 	}
-	return found, nil
+	return len(result.Rows) > 0, nil
 }
 
 // CreateSlot creates a logical replication slot. Creating an existing slot is a no-op.
@@ -351,6 +338,9 @@ func (p *Postgres) CreateSlot(ctx context.Context, name string) error {
 
 	if p.closed {
 		return ErrClosed
+	}
+	if err := validateSlotName(name); err != nil {
+		return err
 	}
 	return p.ensureSlot(ctx, name)
 }
@@ -366,6 +356,9 @@ func (p *Postgres) DropSlot(ctx context.Context, name string) error {
 	if p.closed {
 		return ErrClosed
 	}
+	if err := validateSlotName(name); err != nil {
+		return err
+	}
 
 	conn, err := p.dialReplication(ctx)
 	if err != nil {
@@ -373,7 +366,7 @@ func (p *Postgres) DropSlot(ctx context.Context, name string) error {
 	}
 	defer closeConn(conn)
 
-	err = pglogrepl.DropReplicationSlot(ctx, conn, name, pglogrepl.DropReplicationSlotOptions{})
+	err = replication.DropReplicationSlot(ctx, conn, name, false)
 	if err != nil && !isUndefinedObject(err) {
 		return fmt.Errorf("gpool/postgres/cdc: dropping replication slot %q: %w", name, err)
 	}
@@ -492,7 +485,7 @@ func (p *Postgres) ensureSlot(ctx context.Context, name string) error {
 	}
 	defer closeConn(conn)
 
-	_, err = pglogrepl.CreateReplicationSlot(ctx, conn, name, outputPlugin, pglogrepl.CreateReplicationSlotOptions{})
+	_, err = replication.CreateReplicationSlot(ctx, conn, name, outputPlugin, replication.SlotOptions{})
 	if err != nil && !isDuplicateObject(err) {
 		return fmt.Errorf("gpool/postgres/cdc: creating replication slot %q: %w", name, err)
 	}
@@ -502,16 +495,17 @@ func (p *Postgres) ensureSlot(ctx context.Context, name string) error {
 // controlConn returns the regular connection used for catalog queries and
 // publication DDL, dialing or redialing it as needed. The caller must hold p.mu,
 // which is what keeps it single-threaded.
-func (p *Postgres) controlConn(ctx context.Context) (*pgconn.PgConn, error) {
+func (p *Postgres) controlConn(ctx context.Context) (*wire.Conn, error) {
 	if p.ctrl != nil && !p.ctrl.IsClosed() {
 		return p.ctrl, nil
 	}
-	if p.ctrl != nil {
-		closeConn(p.ctrl)
-		p.ctrl = nil
-	}
+	p.ctrl = nil
 
-	conn, err := pgconn.Connect(ctx, p.config.ConnString)
+	connConfig, err := p.parseConnString()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := wire.Connect(ctx, connConfig)
 	if err != nil {
 		return nil, fmt.Errorf("gpool/postgres/cdc: connecting control connection: %w", err)
 	}
@@ -521,26 +515,44 @@ func (p *Postgres) controlConn(ctx context.Context) (*pgconn.PgConn, error) {
 
 // dialReplication opens a walsender connection. Slot commands and streaming both
 // require replication=database, which an ordinary connection cannot provide.
-func (p *Postgres) dialReplication(ctx context.Context) (*pgconn.PgConn, error) {
-	connConfig, err := pgconn.ParseConfig(p.config.ConnString)
+func (p *Postgres) dialReplication(ctx context.Context) (*wire.Conn, error) {
+	connConfig, err := p.parseConnString()
 	if err != nil {
-		return nil, fmt.Errorf("%w: parsing ConnString: %w", ErrInvalidConfig, err)
-	}
-	if connConfig.RuntimeParams == nil {
-		connConfig.RuntimeParams = make(map[string]string, 1)
+		return nil, err
 	}
 	connConfig.RuntimeParams["replication"] = "database"
 
-	conn, err := pgconn.ConnectConfig(ctx, connConfig)
+	conn, err := wire.Connect(ctx, connConfig)
 	if err != nil {
 		return nil, fmt.Errorf("gpool/postgres/cdc: connecting replication connection: %w", err)
 	}
 	return conn, nil
 }
 
+func (p *Postgres) parseConnString() (*wire.Config, error) {
+	connConfig, err := wire.ParseConfig(p.config.ConnString)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parsing ConnString: %w", ErrInvalidConfig, err)
+	}
+	if connConfig.RuntimeParams == nil {
+		connConfig.RuntimeParams = make(map[string]string, 1)
+	}
+	return connConfig, nil
+}
+
+// validateSlotName checks a slot name with caduceus, before it is
+// interpolated into a replication command, which takes it bare, and reports
+// a refusal as a config error.
+func validateSlotName(name string) error {
+	if err := replication.ValidSlotName(name); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+	return nil
+}
+
 // closeConn closes a management connection with a bounded, cancellation-immune
 // context so shutdown still gets a chance to terminate gracefully.
-func closeConn(conn *pgconn.PgConn) {
+func closeConn(conn *wire.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), connCloseTimeout)
 	defer cancel()
 	_ = conn.Close(ctx)

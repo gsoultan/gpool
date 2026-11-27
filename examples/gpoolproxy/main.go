@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +31,19 @@ import (
 )
 
 func main() {
+	// There is no profiler in this binary to read a heap profile, and sampling
+	// for one costs a table of over a megabyte that is otherwise never looked at.
+	runtime.MemProfileRate = 0
+
+	// The collector's default lets the heap grow to twice what is live before it
+	// runs. What is live here is a kilobyte or so per client, and the steady
+	// state allocates almost nothing, so collecting at half that headroom costs
+	// no measurable CPU and gives the difference back as resident memory. An
+	// explicit GOGC still wins.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(50)
+	}
+
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "gpoolproxy:", err)
 		os.Exit(1)
@@ -79,6 +94,7 @@ func parseFlags(args []string) (Config, error) {
 	flags.IntVar(&maxConns, "max-conns", 0, "server connections to pool (default: max(4, GOMAXPROCS))")
 	flags.IntVar(&minConns, "min-conns", 0, "server connections to keep warm")
 	flags.IntVar(&config.MaxClients, "max-clients", defaultMaxClients, "concurrent client sessions to accept")
+	flags.IntVar(&config.MaxReplicationClients, "max-replication", 0, "replication clients to pass through, each on its own server connection (default: refused)")
 	flags.DurationVar(&lifetime, "max-conn-lifetime", 0, "retire a server connection after this long")
 	flags.DurationVar(&idle, "max-conn-idle", 0, "close a server connection idle this long")
 	flags.StringVar(&config.TLSCert, "tls-cert", "", "certificate for TLS on the client side")

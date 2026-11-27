@@ -3,12 +3,14 @@
 package pool
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"time"
 
+	"github.com/gsoultan/caduceus/wire"
+	"github.com/gsoultan/gpool/pkg/gpool"
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/jackc/pgx/v5"
 )
 
 // Defaults applied by Config.withDefaults for any field left at its zero value.
@@ -19,15 +21,15 @@ const (
 	DefaultResetQueryTimeout = 5 * time.Second
 	DefaultConnectTimeout    = 10 * time.Second
 
-	// DefaultStatementCacheCapacity and DefaultDescriptionCacheCapacity bound the
-	// two per-connection caches pgx keeps.
+	// DefaultStatementCacheCapacity bounds the prepared statements each connection
+	// keeps on the server. 64 covers the query variety of a typical service, and
+	// raising it is one field away. The cache's memory grows with use rather than
+	// being reserved up front, so an idle connection costs nothing for it.
 	//
-	// pgx defaults both to 512 and preallocates each one's map at that capacity, so
-	// they cost roughly 74 KiB per connection before a single statement is prepared
-	// — measured as 57% of the pool's entire heap footprint. That trade suits one
-	// connection; multiplied across a pool it dominates. 64 covers the query variety
-	// of a typical service while cutting the per-connection cost by about an order
-	// of magnitude, and raising it is one field away.
+	// DefaultDescriptionCacheCapacity bounds what a connection that keeps no
+	// statements on the server remembers of them instead: the parameter and
+	// column types of each, which is a few hundred bytes a statement, held by
+	// the client alone.
 	DefaultStatementCacheCapacity   = 64
 	DefaultDescriptionCacheCapacity = 64
 )
@@ -103,25 +105,35 @@ type Config struct {
 
 	// StatementCacheCapacity is how many prepared statements each connection caches.
 	// Defaults to DefaultStatementCacheCapacity; DisableCache turns it off, which
-	// also selects an execution mode that does not name statements server-side.
+	// also selects an execution mode that does not name statements server-side:
+	// each statement is parsed in the same Sync that runs it, so nothing on the
+	// server outlives a Sync. That is the mode for a pooler in transaction mode
+	// that does not track prepared statements.
 	//
 	// This is the single largest per-connection memory cost. Raise it for a service
 	// with wide query variety; lower it when connection count matters more.
 	StatementCacheCapacity int
 
-	// DescriptionCacheCapacity is how many statement descriptions each connection
-	// caches. Defaults to DefaultDescriptionCacheCapacity; DisableCache turns it off.
+	// DescriptionCacheCapacity matters only when no statements are kept on the
+	// server: with StatementCacheCapacity set to DisableCache, or with a
+	// ResetQuery. It is how many statements each connection remembers the
+	// parameter and column types of, so that a statement it has run before takes
+	// one round trip and not a second to ask about it first. Nothing is kept on
+	// the server for it, the columns are checked against the server's every time
+	// a statement runs, and a ResetQuery clears it with everything else.
+	// Defaults to DefaultDescriptionCacheCapacity; DisableCache remembers nothing,
+	// and every statement is asked about before it runs.
 	DescriptionCacheCapacity int
 
 	// BeforeConnect is called with a copy of the parsed connection config before
 	// each new connection is established, allowing per-connection adjustments such
 	// as credential rotation. Optional.
-	BeforeConnect func(*pgx.ConnConfig) error
+	BeforeConnect func(*wire.Config) error
 
 	// AfterConnect is called on each newly established connection, for example to
-	// register custom types or run SET statements. A non-nil error discards the
-	// connection. Optional.
-	AfterConnect func(*pgx.Conn) error
+	// run SET statements. The connection is not pooled yet, and its Release does
+	// nothing. A non-nil error discards the connection. Optional.
+	AfterConnect func(context.Context, gpool.Conn) error
 }
 
 // withDefaults returns a copy of the config with unset fields populated.
@@ -153,9 +165,10 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// cacheCapacity converts a configured capacity into what pgx expects, where zero
-// means disabled. It resolves the default itself rather than assuming withDefaults
-// has already run, so parse gives the same answer whichever order it is called in.
+// cacheCapacity resolves a configured capacity, where zero means the default
+// and DisableCache means none. It resolves the default itself rather than
+// assuming withDefaults has already run, so parse gives the same answer whichever
+// order it is called in.
 func cacheCapacity(configured, fallback int) int {
 	if configured == 0 {
 		return fallback
@@ -194,37 +207,31 @@ func (c Config) pooling() pooling.Config {
 	}
 }
 
-// parse resolves the connection string once, up front. pgx.Connect re-parses on
-// every call, which re-reads the environment, any service file, and ~/.pgpass, so
-// the pool parses a single template and clones it per connection instead.
-func (c Config) parse() (*pgx.ConnConfig, error) {
-	connConfig, err := pgx.ParseConfig(c.ConnString)
+// settings is a Config resolved for dialling: the parsed connection string,
+// how many statements each connection may keep prepared, and how many it may
+// remember the description of when it keeps none.
+type settings struct {
+	conn         *wire.Config
+	statements   int
+	descriptions int
+}
+
+// parse resolves the connection string once, up front, so that opening a
+// connection re-reads no environment and no password file.
+//
+// A reset query such as DISCARD ALL deallocates prepared statements behind the
+// cache's back, and a disabled cache has nowhere to keep them, so either way
+// each query is parsed into the unnamed statement instead, in the Sync that
+// runs it. Parameters are still bound by the server.
+func (c Config) parse() (*settings, error) {
+	connConfig, err := wire.ParseConfig(c.ConnString)
 	if err != nil {
 		return nil, fmt.Errorf("%w: parsing ConnString: %w", ErrInvalidConfig, err)
 	}
-
-	connConfig.StatementCacheCapacity = cacheCapacity(c.StatementCacheCapacity, DefaultStatementCacheCapacity)
-	connConfig.DescriptionCacheCapacity = cacheCapacity(c.DescriptionCacheCapacity, DefaultDescriptionCacheCapacity)
-
-	// A reset query invalidates cached statements, and a disabled cache leaves the
-	// default execution mode with nothing to cache into. Either way the connection
-	// must not rely on named server-side statements.
-	if c.ResetQuery != "" || connConfig.StatementCacheCapacity == 0 {
-		connConfig.DefaultQueryExecMode = resetSafeQueryExecMode
+	statements := cacheCapacity(c.StatementCacheCapacity, DefaultStatementCacheCapacity)
+	if c.ResetQuery != "" {
+		statements = 0
 	}
-	return connConfig, nil
+	descriptions := cacheCapacity(c.DescriptionCacheCapacity, DefaultDescriptionCacheCapacity)
+	return &settings{conn: connConfig, statements: statements, descriptions: descriptions}, nil
 }
-
-// resetSafeQueryExecMode is the execution mode used when a ResetQuery is configured.
-//
-// pgx defaults to caching named prepared statements on the server. A reset query
-// such as DISCARD ALL deallocates them, but the client-side cache does not know
-// that and keeps referencing names the server has dropped, so the connection's next
-// use fails with SQLSTATE 26000. This mode binds parameters over the extended
-// protocol using the unnamed statement, so nothing survives the reset to go stale.
-// It is the same guidance pgx gives for running behind PgBouncer.
-//
-// Parameters are still bound by the server, unlike QueryExecModeSimpleProtocol,
-// which interpolates them client-side. BeforeConnect runs after this and can
-// override it if you know your reset query preserves prepared statements.
-const resetSafeQueryExecMode = pgx.QueryExecModeExec

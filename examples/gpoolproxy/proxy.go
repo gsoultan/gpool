@@ -7,15 +7,29 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gsoultan/gpool/pkg/gpool"
 	"github.com/gsoultan/gpool/pkg/pooling"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
+)
+
+// errClosing reports a client that finished authenticating after the proxy had
+// begun to shut down.
+var errClosing = errors.New("gpoolproxy: shutting down")
+
+// Refusals of a replication client. They are distinct so the client can be told
+// which, in SQLSTATE terms: asking for something this proxy is not configured to
+// give, arriving when every place is taken, or the server not answering.
+var (
+	errReplicationDisabled    = errors.New("gpoolproxy: replication connections are not enabled")
+	errReplicationFull        = errors.New("gpoolproxy: too many replication connections")
+	errReplicationUnavailable = errors.New("gpoolproxy: server refused or did not answer a replication connection")
 )
 
 // cancelTimeout bounds the side connection a cancellation request opens.
@@ -54,6 +68,39 @@ type Proxy struct {
 	listener net.Listener
 	clients  chan struct{}
 
+	// poller is the readiness source every worker waits on, and socks is how a
+	// worker turns the descriptor number it reports back into a socket.
+	poller  *poller
+	socks   *sockTable
+	workers sync.WaitGroup
+	started bool
+
+	// reserve is how a parked worker is called in, parked counts the ones that
+	// could be, and halt releases them all when the proxy stops.
+	reserve chan struct{}
+	parked  atomic.Int32
+	halt    chan struct{}
+
+	// inbox carries work onto a worker from a goroutine that is not one: a
+	// handshake that finished with a query already in hand, a dial that
+	// completed. wakeR and wakeW are the pipe that gets a worker's attention.
+	// It is not on the path of a query.
+	inboxMu     sync.Mutex
+	inbox       []func(*worker)
+	inboxClosed bool
+	wakeR       int
+	wakeW       int
+	stopping    atomic.Bool
+
+	// waiters is the sessions queued for a backend, and growing counts the
+	// goroutines currently dialing one for them.
+	waiters waiters
+	growing atomic.Int32
+
+	// replicating counts the dedicated connections held by replication clients,
+	// which are outside the pool and so outside its accounting.
+	replicating atomic.Int32
+
 	mu       sync.Mutex
 	sessions map[cancelKey]*session
 
@@ -79,15 +126,15 @@ func NewProxy(config Config) (*Proxy, error) {
 		return nil, err
 	}
 
-	// Parsed once and cloned per connection. pgconn.ParseConfig re-reads the
-	// environment, service files and ~/.pgpass every call, which is not work to
-	// repeat for every backend the pool opens.
-	upstream, err := pgconn.ParseConfig(config.Upstream)
+	// Parsed once, here, so that a bad connection string stops the proxy from
+	// starting instead of failing every dial.
+	upstream, err := parseUpstream(config.Upstream)
 	if err != nil {
 		return nil, err
 	}
 
-	driver := &backendDriver{config: upstream, maxPrepared: config.MaxPreparedStatements}
+	socks := newSockTable(descriptorLimit())
+	driver := &backendDriver{upstream: upstream, maxPrepared: config.MaxPreparedStatements, socks: socks}
 	core, err := pooling.New(driver, config.Pool)
 	if err != nil {
 		return nil, err
@@ -107,6 +154,7 @@ func NewProxy(config Config) (*Proxy, error) {
 		users:    users,
 		tls:      tlsConfig,
 		decoy:    decoy,
+		socks:    socks,
 		clients:  make(chan struct{}, config.MaxClients),
 		sessions: make(map[cancelKey]*session),
 		ctx:      ctx,
@@ -137,6 +185,9 @@ func (p *Proxy) Serve() error {
 			return err
 		}
 	}
+	if err := p.startWorkers(); err != nil {
+		return err
+	}
 	p.warm(p.ctx)
 
 	for {
@@ -153,9 +204,10 @@ func (p *Proxy) Serve() error {
 
 // accept starts a session, or turns the client away if the proxy is full.
 //
-// Refusing is the right answer at the limit. Every session costs two goroutines
-// and two relay buffers, so accepting without bound converts a burst of clients
-// into memory exhaustion — the failure mode a pooler exists to prevent.
+// Refusing is the right answer at the limit. A session is cheap but not free, and
+// each one is a descriptor, so accepting without bound converts a burst of
+// clients into exhaustion of one or the other — the failure mode a pooler exists
+// to prevent.
 func (p *Proxy) accept(conn net.Conn) {
 	select {
 	case p.clients <- struct{}{}:
@@ -175,10 +227,365 @@ func (p *Proxy) accept(conn net.Conn) {
 		return
 	}
 
+	// The goroutine lasts only as long as the handshake. An adopted client keeps
+	// its slot until its session closes; anything else gives it back here.
 	p.wg.Go(func() {
-		defer func() { <-p.clients }()
-		newSession(p, conn, key).serve()
+		if !newHandshake(p, conn, key).serve() {
+			<-p.clients
+		}
 	})
+}
+
+// startWorkers brings up the poller and one worker per core. It is idempotent.
+func (p *Proxy) startWorkers() error {
+	if p.started {
+		return nil
+	}
+
+	poller, err := newPoller()
+	if err != nil {
+		return err
+	}
+	var pipe [2]int
+	if err := syscall.Pipe(pipe[:]); err != nil {
+		poller.close()
+		return err
+	}
+	for _, fd := range pipe {
+		syscall.CloseOnExec(fd)
+		_ = syscall.SetNonblock(fd, true)
+	}
+	if err := poller.addLevel(pipe[0]); err != nil {
+		poller.close()
+		_ = syscall.Close(pipe[0])
+		_ = syscall.Close(pipe[1])
+		return err
+	}
+
+	p.poller, p.wakeR, p.wakeW = poller, pipe[0], pipe[1]
+	p.started = true
+
+	count := runtime.GOMAXPROCS(0)
+	p.reserve = make(chan struct{}, count)
+	p.halt = make(chan struct{})
+
+	for i := range count {
+		w := newWorker(p)
+		w.watch = i == 0
+		p.workers.Go(w.run)
+	}
+	return nil
+}
+
+// callReserve brings one parked worker in. It is called by a worker that took
+// as many events as it had room for, which means more are waiting behind them.
+func (p *Proxy) callReserve() {
+	if p.parked.Load() == 0 {
+		return
+	}
+	select {
+	case p.reserve <- struct{}{}:
+	default:
+	}
+}
+
+// park takes a reserve worker out of service until it is called for or the
+// proxy stops. A call that arrives just before the worker parks is not lost:
+// the channel holds it.
+func (p *Proxy) park() {
+	p.parked.Add(1)
+	select {
+	case <-p.reserve:
+	case <-p.halt:
+	}
+	p.parked.Add(-1)
+}
+
+// post runs work on a worker. It reports false once the proxy has shut its
+// workers down, in which case the work will never run and the caller keeps
+// whatever it was handing over.
+func (p *Proxy) post(work func(*worker)) bool {
+	p.inboxMu.Lock()
+	defer p.inboxMu.Unlock()
+
+	if p.inboxClosed {
+		return false
+	}
+	p.inbox = append(p.inbox, work)
+
+	// Written under the lock that Close takes before it closes the pipe, so the
+	// byte cannot land in whatever socket has since been given the number.
+	_, _ = syscall.Write(p.wakeW, []byte{0})
+	return true
+}
+
+// runInbox runs posted work on the worker that was woken for it.
+func (p *Proxy) runInbox(w *worker) {
+	// While stopping, the pipe is left readable on purpose: it is what wakes
+	// every other worker so that each sees the proxy is stopping.
+	if p.stopping.Load() {
+		return
+	}
+
+	var scratch [64]byte
+	for {
+		n, err := syscall.Read(p.wakeR, scratch[:])
+		if n < len(scratch) || err != nil {
+			break
+		}
+	}
+	p.drainInbox(w)
+}
+
+func (p *Proxy) drainInbox(w *worker) {
+	p.inboxMu.Lock()
+	posted := p.inbox
+	p.inbox = nil
+	p.inboxMu.Unlock()
+
+	for _, work := range posted {
+		work(w)
+	}
+}
+
+// adopt turns an authenticated connection into a session the workers serve.
+// early is whatever the client sent beyond its handshake.
+// replicate opens a dedicated server connection for a replication client.
+//
+// It is not taken from the pool and never returns to it. Logical replication
+// cannot be pooled: CopyBoth never yields a transaction boundary, and a slot
+// admits one walsender. So the proxy does for such a client what PgBouncer does,
+// which is get out of the way — one client, one server connection, bytes passed
+// through until either end hangs up.
+//
+// The count is taken before dialing so that a burst of clients cannot open more
+// connections than the bound while their dials are still in flight.
+func (p *Proxy) replicate(ctx context.Context, mode string) (*backend, error) {
+	limit := int32(p.config.MaxReplicationClients)
+	if limit == 0 {
+		return nil, errReplicationDisabled
+	}
+	if p.replicating.Add(1) > limit {
+		p.replicating.Add(-1)
+		return nil, errReplicationFull
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, replicationDialTimeout)
+	defer cancel()
+
+	target, err := p.driver.Replicate(ctx, mode)
+	if err != nil {
+		p.replicating.Add(-1)
+		// The cause is not wrapped: a dial error can quote the connection
+		// string, and this one travels towards a client.
+		return nil, errReplicationUnavailable
+	}
+	return target, nil
+}
+
+// endReplication closes a dedicated connection and gives its place back.
+func (p *Proxy) endReplication(target *backend) {
+	_ = p.driver.Close(context.Background(), target)
+	p.replicating.Add(-1)
+}
+
+// adopt hands an authenticated client to the event loop. pinned, when not nil,
+// is a dedicated server connection the session holds for its whole life; if
+// adopt fails it is still the caller's to close.
+func (p *Proxy) adopt(conn net.Conn, key cancelKey, early []byte, pinned *backend) error {
+	if p.closing.Load() {
+		return errClosing
+	}
+
+	fd, err := takeOver(conn)
+	if err != nil {
+		return err
+	}
+
+	s := &session{
+		proxy:      p,
+		key:        key,
+		statements: statements{limit: p.config.MaxPreparedStatements},
+	}
+	s.client.fd = fd
+	s.client.owner.Store(s)
+	if len(early) > 0 {
+		s.client.in = append([]byte(nil), early...)
+		s.stalled = true
+	}
+
+	if pinned != nil {
+		s.pinned = true
+		s.backend = pinned
+		pinned.sock.owner.Store(s)
+	}
+
+	p.register(s)
+	if !p.socks.put(&s.client) {
+		p.unregister(s)
+		_ = syscall.Close(fd)
+		return errTooManyDescriptors
+	}
+
+	// The pinned connection is listed before the client is, so that if it
+	// cannot be, nothing is yet live to undo. From here its events may arrive on
+	// any worker, which is why the session was complete before this line.
+	if pinned != nil {
+		if err := pinned.enlist(p.poller); err != nil {
+			p.socks.drop(&s.client)
+			p.unregister(s)
+			_ = syscall.Close(fd)
+			return err
+		}
+	}
+
+	// Registering reports the socket's current readiness, so a query that
+	// arrives before this returns is not missed.
+	if err := p.poller.add(fd); err != nil {
+		// A worker may already be serving the pinned connection's first event,
+		// so the session is retired under its lock rather than out from under it.
+		s.mu.Lock()
+		s.closed = true
+		s.backend = nil
+		s.mu.Unlock()
+		if pinned != nil {
+			pinned.delist(p.poller)
+			pinned.sock.owner.Store(nil)
+		}
+
+		p.socks.drop(&s.client)
+		p.unregister(s)
+		_ = syscall.Close(fd)
+		return err
+	}
+
+	// What the client sent early is already out of the kernel, so no event will
+	// ever announce it.
+	if len(early) > 0 {
+		p.post(func(w *worker) { w.serve(s, s.advance) })
+	}
+	return nil
+}
+
+// departed is called by a session as it closes.
+func (p *Proxy) departed(s *session) {
+	p.unregister(s)
+	<-p.clients
+}
+
+// background runs work that would block an event loop on a goroutine the proxy
+// waits for at shutdown.
+func (p *Proxy) background(work func()) {
+	p.wg.Go(work)
+}
+
+// handoff offers a just-released backend to the longest-waiting session.
+//
+// from is the worker doing the releasing, or nil off a worker. A worker delivers
+// the connection itself as soon as it has finished with the session that
+// released it, so on the path every query takes there is no wake-up and no
+// thread switch between one client finishing and the next one starting.
+func (p *Proxy) handoff(from *worker) {
+	for !p.waiters.empty() {
+		handle, ok := p.core.TryAcquire()
+		if !ok {
+			p.grow()
+			return
+		}
+		if s := p.waiters.pop(); s != nil {
+			p.grant(s, handle, from)
+			return
+		}
+		// Everyone queued had already left. Returned rather than kept, and the
+		// queue looked at again in case someone joined in the meantime.
+		handle.Release()
+	}
+}
+
+// grant gives a checked-out backend to a session that was waiting for one.
+func (p *Proxy) grant(s *session, handle pooling.Handle[*backend], from *worker) {
+	matched := grant{to: s, handle: handle}
+	if from != nil {
+		from.grants = append(from.grants, matched)
+		return
+	}
+
+	delivered := p.post(func(w *worker) {
+		w.grants = append(w.grants, matched)
+		w.deliver()
+	})
+	if !delivered {
+		handle.Release()
+	}
+}
+
+// restore returns a backend that turned out not to be needed, and passes it on.
+func (p *Proxy) restore(handle pooling.Handle[*backend], from *worker) {
+	handle.Release()
+	p.handoff(from)
+}
+
+// grow dials another backend for the sessions that are waiting, if the pool has
+// room for one.
+//
+// A waiter is normally served by the next release. That only works when there is
+// a next release: a pool that has not yet opened its connections, or has just
+// lost them, has nothing to release, and the engine only dials from Acquire —
+// which blocks, and so cannot be called from a worker.
+func (p *Proxy) grow() {
+	limit := p.core.MaxConns()
+	if p.core.Stat().TotalConnections() >= limit {
+		return
+	}
+	if p.growing.Add(1) > limit {
+		p.growing.Add(-1)
+		return
+	}
+	p.background(p.dial)
+}
+
+// dial acquires backends the blocking way on behalf of queued sessions, for as
+// long as there are sessions queued and room to grow.
+func (p *Proxy) dial() {
+	defer func() {
+		p.growing.Add(-1)
+		// Someone may have queued and been turned away by the limit on dialers
+		// in the instant this one decided to stop.
+		if !p.waiters.empty() && !p.closing.Load() {
+			p.handoff(nil)
+		}
+	}()
+
+	for !p.waiters.empty() && !p.closing.Load() {
+		handle, err := p.core.Acquire(p.ctx)
+		s := p.waiters.pop()
+
+		switch {
+		case err != nil && s != nil:
+			// One failed dial answers one waiter. The rest each get their own
+			// attempt, so a server that comes back mid-queue serves whoever is
+			// still waiting.
+			p.post(func(w *worker) { w.serve(s, s.refused) })
+		case err != nil:
+			return
+		case s == nil:
+			handle.Release()
+		default:
+			p.grant(s, handle, nil)
+		}
+
+		if p.core.Stat().TotalConnections() >= p.core.MaxConns() {
+			return
+		}
+	}
+}
+
+// sendCancel asks the server to cancel whatever the backend with this key is
+// running.
+func (p *Proxy) sendCancel(pid uint32, secret []byte) {
+	ctx, done := context.WithTimeout(p.ctx, cancelTimeout)
+	defer done()
+	_ = p.driver.cancel(ctx, pid, secret)
 }
 
 // refuse tells a client the proxy is full, in the protocol's own terms, so it
@@ -187,15 +594,7 @@ func (p *Proxy) refuse(conn net.Conn) {
 	defer conn.Close()
 
 	_ = conn.SetWriteDeadline(time.Now().Add(cancelTimeout))
-	encoded, err := (&pgproto3.ErrorResponse{
-		Severity: "FATAL",
-		Code:     "53300", // too_many_connections
-		Message:  "too many clients already",
-	}).Encode(nil)
-	if err != nil {
-		return
-	}
-	_, _ = conn.Write(encoded)
+	_, _ = conn.Write(errorResponse("FATAL", "53300", "too many clients already"))
 }
 
 // register makes a session reachable by its cancellation key.
@@ -225,16 +624,9 @@ func (p *Proxy) cancel(pid uint32, secret string) {
 	if target == nil {
 		return
 	}
-
-	source, unlock := target.currentBackend()
-	defer unlock()
-	if source == nil {
-		return
-	}
-
-	ctx, done := context.WithTimeout(p.ctx, cancelTimeout)
-	defer done()
-	_ = p.driver.cancel(ctx, source)
+	target.mu.Lock()
+	target.cancel()
+	target.mu.Unlock()
 }
 
 // parameters reports the server settings replayed to clients during startup.
@@ -269,6 +661,9 @@ func (p *Proxy) warm(ctx context.Context) {
 		return
 	}
 	handle.Release()
+
+	// Released outside a session, so nobody else will offer it to the queue.
+	p.handoff(nil)
 }
 
 // upgrade wraps a client connection in TLS.
@@ -299,13 +694,9 @@ func (p *Proxy) Close() {
 		_ = p.listener.Close()
 	}
 
-	// Sessions are parked reading from clients that may never send again, so
-	// they have to be woken rather than waited for.
-	p.mu.Lock()
-	for _, s := range p.sessions {
-		_ = s.conn.SetDeadline(time.Unix(0, 0))
+	if p.started {
+		p.shutdown()
 	}
-	p.mu.Unlock()
 
 	p.wg.Wait()
 	p.core.Close()
@@ -351,4 +742,43 @@ func randomSecret() string {
 		return string(buf[:])
 	}
 	return string(buf[:])
+}
+
+// shutdown stops the workers and closes every session.
+func (p *Proxy) shutdown() {
+	// The wake pipe is written once and, while stopping, never drained, so it
+	// stays readable until every worker has woken and seen the flag.
+	p.stopping.Store(true)
+	p.inboxMu.Lock()
+	_, _ = syscall.Write(p.wakeW, []byte{0})
+	p.inboxMu.Unlock()
+	close(p.halt)
+	p.workers.Wait()
+
+	// With no workers left, this goroutine is the only one serving sessions and
+	// stands in for one. Work posted before the door closed is still owed: a
+	// backend on its way to a session has to be given back by someone.
+	last := newWorker(p)
+	p.inboxMu.Lock()
+	p.inboxClosed = true
+	p.inboxMu.Unlock()
+	p.drainInbox(last)
+
+	// Handshakes and dials still running finish against a closed inbox, and
+	// only then is the set of sessions final.
+	p.wg.Wait()
+
+	for fd := range p.socks.slots {
+		sk := p.socks.get(fd)
+		if sk == nil || sk.backend != nil {
+			continue
+		}
+		if s := sk.owner.Load(); s != nil {
+			last.serve(s, s.close)
+		}
+	}
+
+	p.poller.close()
+	_ = syscall.Close(p.wakeR)
+	_ = syscall.Close(p.wakeW)
 }

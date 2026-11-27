@@ -68,16 +68,29 @@ Found by an integration test asserting the wrong thing: resuming from event 2 of
 
 ## Two connection kinds, never shared
 
-- **Control** — ordinary `pgconn.PgConn`, lazily opened, guarded by `p.mu` for the
+- **Control** — ordinary `wire.Conn`, lazily opened, guarded by `p.mu` for the
   whole operation. Publication DDL and `pg_publication_tables` queries.
 - **Replication** — `replication=database`. Short-lived for slot commands; one
   long-lived instance owned exclusively by the stream.
 
 They cannot be shared. After `START_REPLICATION` the walsender is in CopyBoth where
-an ordinary query is protocol-illegal, and `PgConn` is not concurrency-safe anyway.
+an ordinary query is protocol-illegal, and `wire.Conn` is not concurrency-safe anyway.
 Running table management against the streaming connection corrupts the protocol.
-Slot names must be validated (`slotNamePattern`) because pglogrepl interpolates them
-unquoted.
+Slot names must be validated (`replication.ValidSlotName` from caduceus, through
+`validateSlotName`, which wraps it as `ErrInvalidConfig`, in config validation and in
+`CreateSlot`/`DropSlot`) because the replication grammar takes them unquoted. The
+walsender commands themselves come from caduceus `replication`; gpool keeps no copy.
+
+## Decoding
+
+`pgoutput.go` reads protocol version 1 straight from the CopyData payload with a
+`reader` that records the first short read as `errMalformed` and returns zeros
+after, so a message is read whole and checked once. Tuples decode directly into
+the event's maps; nothing intermediate. Fuzzed by `FuzzDecodeRecord`: the bytes come
+from the network and a panic in `run` would take the consumer's process down.
+`receive` sets a read deadline of one standby interval per read; a timeout leaves
+the connection intact. `Close` interrupts by moving only the *read* deadline into
+the past, so the final status update can still be written.
 
 ## Stream topology
 

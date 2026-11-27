@@ -8,33 +8,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/gsoultan/caduceus/wire"
 )
-
-func TestQuoteIdentifier(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{name: "plain", input: "users", want: `"users"`},
-		{name: "mixed case is preserved", input: "Users", want: `"Users"`},
-		{name: "embedded quote is doubled", input: `we"ird`, want: `"we""ird"`},
-		{name: "injection attempt is neutralised", input: `x"; DROP TABLE y; --`, want: `"x""; DROP TABLE y; --"`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := quoteIdentifier(tt.input); got != tt.want {
-				t.Fatalf("quoteIdentifier(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
 
 // Quoting "public.users" as a single identifier names a table literally called
 // "public.users" rather than users in schema public, so the parts must be split.
@@ -90,31 +65,6 @@ func TestSplitQualifiedName(t *testing.T) {
 	}
 }
 
-// Plugin arguments are interpolated into START_REPLICATION, so a quote in a
-// publication name must not be able to close the literal.
-func TestQuoteLiteral(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{input: "pub", want: `'pub'`},
-		{input: "it's", want: `'it''s'`},
-		{input: `a', injected '`, want: `'a'', injected '''`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			t.Parallel()
-
-			if got := quoteLiteral(tt.input); got != tt.want {
-				t.Fatalf("quoteLiteral(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
 // Classifying catalog errors by SQLSTATE keeps behaviour correct on a server whose
 // lc_messages is not English, where matching on message text silently fails.
 func TestErrorClassificationUsesSQLState(t *testing.T) {
@@ -128,28 +78,28 @@ func TestErrorClassificationUsesSQLState(t *testing.T) {
 	}{
 		{
 			name:          "duplicate object",
-			err:           &pgconn.PgError{Code: codeDuplicateObject, Message: "publication already exists"},
+			err:           &wire.Error{Code: codeDuplicateObject, Message: "publication already exists"},
 			wantDuplicate: true,
 		},
 		{
 			name:          "duplicate table",
-			err:           &pgconn.PgError{Code: codeDuplicateTable},
+			err:           &wire.Error{Code: codeDuplicateTable},
 			wantDuplicate: true,
 		},
 		{
 			name:          "undefined object",
-			err:           &pgconn.PgError{Code: codeUndefinedObject},
+			err:           &wire.Error{Code: codeUndefinedObject},
 			wantUndefined: true,
 		},
 		{
 			name: "wrapped error is still classified",
 			err: fmt.Errorf("creating publication: %w",
-				&pgconn.PgError{Code: codeDuplicateObject}),
+				&wire.Error{Code: codeDuplicateObject}),
 			wantDuplicate: true,
 		},
 		{
 			name: "localised message without a matching code",
-			err:  &pgconn.PgError{Code: "42501", Message: "permiso denegado"},
+			err:  &wire.Error{Code: "42501", Message: "permiso denegado"},
 		},
 		{
 			name: "plain error",
