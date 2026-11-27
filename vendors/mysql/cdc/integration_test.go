@@ -14,10 +14,10 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	mysqlpool "github.com/gsoultan/gpool/vendors/mysql"
-	mysqlcdc "github.com/gsoultan/gpool/vendors/mysql/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
+	mysqlpool "github.com/gsoultan/nextar-engine/vendors/mysql"
+	mysqlcdc "github.com/gsoultan/nextar-engine/vendors/mysql/cdc"
 )
 
 // These tests need a MySQL or MariaDB with binary logging in ROW format:

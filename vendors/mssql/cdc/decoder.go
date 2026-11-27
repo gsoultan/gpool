@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // Values SQL Server writes into __$operation.

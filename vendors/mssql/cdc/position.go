@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // lsnLen is the width of a SQL Server log sequence number, which is binary(10).

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/sqldriver"
-	"github.com/gsoultan/gpool/vendors/mysql"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar-engine/pkg/sqldriver"
+	"github.com/gsoultan/nextar-engine/vendors/mysql"
 )
 
 // target is one server the suite runs against.

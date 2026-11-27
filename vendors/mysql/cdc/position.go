@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // MySQL names a place in the binary log two different ways, and a position has

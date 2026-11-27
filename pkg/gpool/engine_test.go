@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
 )
 
 func TestEngineRegistersTheInitialSubscriber(t *testing.T) {

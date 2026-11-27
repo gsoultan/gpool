@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/sqldriver"
-	"github.com/gsoultan/gpool/vendors/clickhouse"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar-engine/pkg/sqldriver"
+	"github.com/gsoultan/nextar-engine/vendors/clickhouse"
 )
 
 // dsn returns the configured DSN, skipping when none is set.

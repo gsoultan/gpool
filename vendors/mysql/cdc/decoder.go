@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // decodeRows converts one binlog row event into change events.

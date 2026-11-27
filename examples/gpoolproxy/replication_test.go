@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar-engine/pkg/pooling"
 )
 
 // requireLogical skips a test on a server that cannot decode its WAL.

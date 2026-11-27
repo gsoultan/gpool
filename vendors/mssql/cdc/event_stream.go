@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // sqlEventStream polls SQL Server's change tables, implementing cdc.EventStream.

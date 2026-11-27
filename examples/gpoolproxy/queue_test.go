@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar-engine/pkg/pooling"
 )
 
 // pairDriver hands the pool backends that are one end of a socket pair, so the

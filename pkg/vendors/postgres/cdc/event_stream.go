@@ -12,7 +12,7 @@ import (
 
 	"github.com/gsoultan/caduceus/replication"
 	"github.com/gsoultan/caduceus/wire"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // statusTimeout bounds a single standby status update.

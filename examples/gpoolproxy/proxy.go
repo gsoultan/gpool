@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar-engine/pkg/pooling"
 )
 
 // errClosing reports a client that finished authenticating after the proxy had

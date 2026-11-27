@@ -3,7 +3,7 @@
 package pool
 
 import (
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
 )
 
 // rowCursor is a view over the row a result set is currently positioned on,

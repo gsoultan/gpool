@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/gsoultan/caduceus/replication"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // position renders a WAL offset as a cdc.Position, in PostgreSQL's own "X/Y"

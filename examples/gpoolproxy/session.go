@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar-engine/pkg/pooling"
 )
 
 // session is one authenticated client, served by the event-loop workers.

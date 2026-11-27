@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar-engine/pkg/pooling"
 )
 
 const (

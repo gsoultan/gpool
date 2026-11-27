@@ -7,7 +7,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // A position is the only thing a consumer persists in order to resume, so the

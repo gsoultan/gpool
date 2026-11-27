@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
 )
 
 // A position is the only durable record a SQL Server consumer has of its

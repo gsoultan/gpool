@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
 )
 
 func connString(t *testing.T) string {

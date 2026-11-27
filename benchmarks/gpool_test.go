@@ -8,8 +8,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
 )
 
 // requireDatabase returns the configured connection string, skipping when unset.

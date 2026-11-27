@@ -5,7 +5,7 @@ package pool
 import (
 	"fmt"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar-engine/pkg/gpool"
 )
 
 // init registers the PostgreSQL pool factory. Importing this package is what makes
