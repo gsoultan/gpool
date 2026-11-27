@@ -29,7 +29,7 @@ header, security-first, readability limits, modern Go 1.26 idioms — applies as
 ## 🚀 Environment & Workflow
 
 ### Environment Setup
-- **Go Version**: Developed and tested with **Go 1.26.5**.
+- **Go Version**: Developed and tested with **Go 1.27.4**.
 - **Pathing**: If `go` is not available in the default `PATH` on macOS, it is typically located at `/opt/homebrew/bin/go`.
 - **Token Optimization**: The **rtk** (Rust Toolkit Killer) CLI proxy is installed at `/opt/homebrew/bin/rtk`. Always prepend `rtk` to supported shell commands (e.g., `go`, `git`, `test`, `graphify`) to optimize token usage.
 - **Knowledge Graph**: **Graphify** is used for codebase navigation and architecture reasoning.
@@ -291,7 +291,7 @@ To maintain clarity and high cohesion:
 - **PgBouncer Integration**: All database connection pooling and configurations must be optimized for PgBouncer.
 - **Transaction Mode**: Use transaction mode for high performance and compatibility with PgBouncer.
 
-### ⚡ Modern Go Syntax (1.26+)
+### ⚡ Modern Go Syntax (1.27+)
 - **Idiomatic Go**: Use modern Go syntax and idioms (e.g., `any`, generics, `errors.Is`, `slices.Contains`, `maps.Keys`).
 - **Modern Idioms**:
     - Use `new(val)` for pointer allocations.
@@ -303,7 +303,7 @@ To maintain clarity and high cohesion:
     - Use `t.Context()` in tests and `b.Loop()` in benchmarks.
     - Use `omitzero` struct tags for JSON.
 - **Generics**: Use generics (type parameters) to write reusable and type-safe code; avoid redundant code or unnecessary use of any when generics can be applied.
-- **New Features**: Leverage Go 1.26 specific features like `for range` over integers, `max`/`min` functions, and `omitzero` struct tags.
+- **New Features**: Leverage Go 1.27 specific features like `for range` over integers, `max`/`min` functions, and `omitzero` struct tags.
 - **Context**: Always propagate `context.Context` correctly and use `t.Context()` in tests.
 
 ---
@@ -325,7 +325,7 @@ All the code generated must follow all the points of these guidelines.
 - **No Nested If**: Use guard clauses and return early.
 - **Clean Loops**: Avoid unnecessary `if-then` in loops; use pre-filtering or strategy patterns.
 - **Object Oriented**: Must be strongly Object Oriented.
-- **Modern Syntax**: Must use Modern Go 1.26 syntax.
+- **Modern Syntax**: Must use Modern Go 1.27 syntax.
 - **Avoid Stuttering**: Filenames and symbols must not repeat parent names or package names.
 - **Reliability**: Ensure no errors, no panics, and no unexpected behavior. Error handling must be robust.
 - **Security**: Follow secure coding practices to prevent exploits and vulnerabilities.
@@ -335,7 +335,7 @@ All the code generated must follow all the points of these guidelines.
 
 ## 🚀 Performance & Lightweight
 - **No Memory Leaks**: Close all connections/bodies; cancel contexts; avoid goroutine leaks.
-- **Modern Idioms**: Leverage the latest Go 1.26 features (`iterators`, `slices` helpers, `omitzero`).
+- **Modern Idioms**: Leverage the latest Go 1.27 features (`iterators`, `slices` helpers, `omitzero`).
 - **High Performance**: Avoid hot-path allocations; reuse buffers; use `sync.Pool`.
 - **Lightweight**: Prefer stdlib; minimal dependencies.
 - **PgBouncer Integration**: Optimize for PgBouncer transaction mode.

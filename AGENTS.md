@@ -36,7 +36,7 @@ These outrank convenience. Every profile enforces them.
 
 **Owns:** all of `pkg/`. Idiomatic Go, API ergonomics, allocation discipline.
 
-- Go 1.26 idioms: `iter.Seq`, `range` over int, `wg.Go`, `t.Context()`, `errors.Join`,
+- Go 1.27 idioms: `iter.Seq`, `range` over int, `wg.Go`, `t.Context()`, `errors.Join`,
   `slices`/`maps`, `min`/`max`, `clear`.
 - One struct or one interface per file. Filenames must not restate the folder
   (`shard.go`, not `pool_shard.go`). Symbols must not restate the package

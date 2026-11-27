@@ -38,11 +38,18 @@ type pgEventStream struct {
 
 	// received is the highest WAL position read off the wire.
 	received atomic.Uint64
-	// lastPushed is the position of the most recent event handed to the channel.
-	lastPushed atomic.Uint64
 	// flushed is the position the consumer has finished processing. It is what the
 	// server records as confirmed_flush_lsn, and therefore what releases WAL.
 	flushed atomic.Uint64
+
+	// pushed and acked count events rather than compare positions. pushed is
+	// how many the reader has handed to the channel; acked is how many loop
+	// bodies have returned. Equal counts are the only reliable proof that the
+	// consumer holds nothing: positions cannot say it, because pgoutput sends
+	// transactions in commit order while each change keeps the LSN of its own
+	// record, so interleaved transactions arrive with positions going backwards.
+	pushed atomic.Uint64
+	acked  atomic.Uint64
 
 	mu  sync.Mutex
 	err error
@@ -98,7 +105,10 @@ func (s *pgEventStream) All() iter.Seq[cdc.Event] {
 			if !yield(pending.event) {
 				return
 			}
+			// The position first, then the count: catchUp reads the count and
+			// relies on every acknowledged position already being in flushed.
 			advance(&s.flushed, pending.lsn)
+			s.acked.Add(1)
 		}
 	}
 }
@@ -305,10 +315,10 @@ func toOp(op replication.Op) cdc.Op {
 // emit hands an event to the consumer, continuing to confirm the stream's position
 // while it waits. It reports whether to keep running.
 func (s *pgEventStream) emit(pending pendingEvent, ticker *time.Ticker) bool {
-	// Published before the send so catchUp, which runs in this same goroutine
+	// Counted before the send so catchUp, which runs in this same goroutine
 	// between sends, can never see an empty channel and conclude the pipeline is
 	// drained while an event is in flight.
-	s.lastPushed.Store(pending.lsn)
+	s.pushed.Add(1)
 
 	for {
 		select {
@@ -329,17 +339,22 @@ func (s *pgEventStream) emit(pending pendingEvent, ticker *time.Ticker) bool {
 // Without it the confirmed position only ever advances on a row change, so a
 // publication that goes quiet pins every WAL segment written since the last event.
 // On a busy database with a quiet publication that fills the primary's disk.
+//
+// "Drained" is decided by counting, never by comparing positions. An earlier
+// version required the last pushed position to equal the confirmed one, which
+// stopped holding for good once two transactions interleaved — the later commit
+// carries the lower record LSNs — and the slot was pinned again. Comparing with
+// a maximum instead would be worse: with a lower-positioned event still inside
+// the consumer's loop body the two would match, and confirming the server's end
+// would skip that event's transaction on restart.
 func (s *pgEventStream) catchUp(serverEnd uint64) {
 	if len(s.events) != 0 {
 		return
 	}
-	pushed := s.lastPushed.Load()
-	if pushed != s.flushed.Load() || serverEnd <= pushed {
+	if s.acked.Load() != s.pushed.Load() {
 		return
 	}
-
-	s.flushed.Store(serverEnd)
-	s.lastPushed.Store(serverEnd)
+	advance(&s.flushed, serverEnd)
 }
 
 // sendStatus confirms the stream's position to the server. It reports whether to

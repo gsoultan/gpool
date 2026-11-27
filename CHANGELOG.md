@@ -47,6 +47,18 @@ reason and the migration.
 
 ### Changed
 
+- **Go 1.27.4 is now the minimum toolchain.** Every module's `go` directive
+  (core, the MySQL, MySQL CDC, SQL Server and ClickHouse vendors, and the
+  `gpoolproxy` example) moves from 1.26.5 to 1.27.4, and CI builds with it.
+  1.26.5 carried standard-library advisories that failed `govulncheck`.
+  A consumer still on Go 1.26 must upgrade before taking this release.
+- Dependency minimums raised to clear reachable `govulncheck` findings:
+  `golang.org/x/text` v0.44.0 (GO-2026-6629, reachable from the PostgreSQL CDC
+  dial path when it ran on pgx) in the MySQL CDC and SQL Server modules; the core
+  and `gpoolproxy` modules no longer require it at all, on caduceus;
+  `github.com/klauspost/compress` v1.20.2 (GO-2026-6865) in MySQL CDC and
+  ClickHouse; `github.com/andybalholm/brotli` v1.2.7 (GO-2026-6888) in ClickHouse.
+
 - **`Begin` on PostgreSQL no longer makes a round trip.** `BEGIN` travels with
   the transaction's first statement, in the same write, so `Begin`, one
   statement and `Commit` take one round trip fewer, two where they took three
@@ -235,6 +247,19 @@ reason and the migration.
   to a client asking for 3.2, as a server older than 18 does.
 
 ### Fixed
+
+- **A quiet PostgreSQL publication pinned WAL again after two transactions
+  interleaved.** pgoutput sends transactions in commit order, but each change
+  keeps the LSN of its own record, so a transaction that wrote first and
+  committed last arrives with positions *below* the one before it. The stream
+  decided the consumer had caught up by comparing the last pushed position with
+  the confirmed one, and after an interleave those never matched again: the slot
+  stopped following the server's keepalives until the next published change, and
+  retained every WAL segment written meanwhile. It now counts events handed to
+  the consumer against events it has finished, which is correct whatever order
+  the positions arrive in. Comparing against the highest pushed position instead
+  was rejected: it would confirm past a lower-positioned event still inside the
+  loop body, and lose that transaction on restart.
 
 - **`examples/gpoolproxy` recorded a Parse or Close as done before the server
   ran it.** After an error the server skips every message up to the Sync, the

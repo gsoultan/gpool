@@ -1,6 +1,6 @@
 module github.com/gsoultan/gpool/examples/gpoolproxy
 
-go 1.26.5
+go 1.27.4
 
 require github.com/gsoultan/gpool v1.0.0
 

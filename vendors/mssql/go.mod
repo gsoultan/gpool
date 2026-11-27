@@ -1,6 +1,6 @@
 module github.com/gsoultan/gpool/vendors/mssql
 
-go 1.26.5
+go 1.27.4
 
 require (
 	github.com/gsoultan/gpool v1.0.1
@@ -13,7 +13,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )
 
 // The vendor module tracks the core from the same commit during development.

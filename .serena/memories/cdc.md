@@ -108,18 +108,26 @@ connection is never touched from two goroutines.
 
 ## Position tracking
 
-Three monotonic `atomic.Uint64` advanced via `advance()` (CAS loop):
+Two monotonic positions, advanced via `advance()` (CAS loop):
 
 - `received` — highest LSN off the wire (XLogData and keepalive `ServerWALEnd`).
-- `lastPushed` — LSN of the last event handed to the channel. Set **before** the
-  channel send, so `catchUp` cannot see an empty channel while an event is in flight.
 - `flushed` — what the consumer finished. Set by `All()` *after* `yield` returns.
   This is `confirmed_flush_lsn`, i.e. what releases WAL. At-least-once delivery.
 
-`catchUp(serverEnd)` jumps `flushed` to the server's WAL end only when
-`len(events)==0 && lastPushed==flushed`. Without it the position only ever moves on a
+Two event counters, `pushed` (incremented by `emit` **before** the channel send) and
+`acked` (incremented by `All()` after advancing `flushed`).
+
+`catchUp(serverEnd)` advances `flushed` to the server's WAL end only when
+`len(events)==0 && acked==pushed`. Without it the position only ever moves on a
 row change, so a quiet publication pins every WAL segment written since the last
 event and eventually fills the primary's disk.
+
+Drained is decided by **counting, never by comparing positions**. pgoutput sends
+transactions in commit order but each change keeps its own record's LSN, so
+interleaved transactions arrive with positions going backwards. Comparing the last
+pushed LSN with `flushed` latched forever after one interleave (slot pinned again);
+comparing the *highest* pushed LSN would confirm past a lower-positioned event still
+in the consumer's loop body (data loss on restart).
 
 Start LSN `0` = resume from the slot's `confirmed_flush_lsn`. Using
 `IDENTIFY_SYSTEM`'s `XLogPos` instead silently discards everything the slot retained
