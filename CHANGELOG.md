@@ -26,6 +26,19 @@ reason and the migration.
 
 ## [Unreleased]
 
+### Changed
+
+- **Go 1.27.4 is now the minimum toolchain.** Every module's `go` directive
+  (core, the MySQL, MySQL CDC, SQL Server and ClickHouse vendors, and the
+  `gpoolproxy` example) moves from 1.26.5 to 1.27.4, and CI builds with it.
+  1.26.5 carried standard-library advisories that failed `govulncheck`.
+  A consumer still on Go 1.26 must upgrade before taking this release.
+- Dependency minimums raised to clear reachable `govulncheck` findings:
+  `golang.org/x/text` v0.44.0 (GO-2026-6629, reachable from the PostgreSQL CDC
+  dial path) in the core, MySQL CDC, SQL Server and `gpoolproxy` modules;
+  `github.com/klauspost/compress` v1.20.2 (GO-2026-6865) in MySQL CDC and
+  ClickHouse; `github.com/andybalholm/brotli` v1.2.7 (GO-2026-6888) in ClickHouse.
+
 ### Fixed
 
 - **A quiet PostgreSQL publication pinned WAL again after two transactions
