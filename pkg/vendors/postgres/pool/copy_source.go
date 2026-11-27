@@ -2,7 +2,7 @@
 
 package pool
 
-import "github.com/gsoultan/nextar-engine/pkg/gpool"
+import "github.com/gsoultan/nextar/pkg/gpool"
 
 // copySource is a gpool.CopyRows as caduceus reads it, with each row's
 // driver.Valuers resolved the way query arguments are.

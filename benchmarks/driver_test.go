@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

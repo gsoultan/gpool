@@ -3,8 +3,8 @@
 package mysql
 
 import (
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/sqldriver"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/sqldriver"
 )
 
 // New creates a MySQL or MariaDB pool. It validates the configuration and parses

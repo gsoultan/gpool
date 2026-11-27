@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
+	postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 
 // gpool encodes parameters and decodes results itself now, choosing binary or

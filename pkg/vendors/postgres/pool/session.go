@@ -7,7 +7,7 @@ import (
 
 	"github.com/gsoultan/caduceus"
 	"github.com/gsoultan/caduceus/wire"
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // cursor is a result being read off a connection.

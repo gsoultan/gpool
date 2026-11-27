@@ -5,7 +5,7 @@ package main
 import (
 	"testing"
 
-	"github.com/gsoultan/nextar-engine/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // failing is a statement that fails as it runs, and the server skips every

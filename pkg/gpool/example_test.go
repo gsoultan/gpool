@@ -9,10 +9,10 @@ import (
 	"log"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
-	postgrescdc "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/cdc"
-	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
+	postgrescdc "github.com/gsoultan/nextar/pkg/vendors/postgres/cdc"
+	postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 
 // These compile but do not run: every one needs a database, and an example that

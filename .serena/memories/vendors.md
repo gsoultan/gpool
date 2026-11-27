@@ -7,7 +7,7 @@ PostgreSQL-only consumer never downloads another driver and govulncheck never
 flags a CVE in something they do not import. Cost: a `go get` per vendor, and a
 tag per module per release.
 
-Vendor modules carry `replace github.com/gsoultan/nextar-engine => ../..` for local
+Vendor modules carry `replace github.com/gsoultan/nextar => ../..` for local
 development. A replace in a *dependency* is ignored by consumers, so it is safe
 to commit; it only affects building and testing that module in place.
 

@@ -1,12 +1,12 @@
-module github.com/gsoultan/nextar-engine/vendors/mysql/cdc
+module github.com/gsoultan/nextar/vendors/mysql/cdc
 
 go 1.27.4
 
 require (
 	github.com/go-mysql-org/go-mysql v1.16.0
 	github.com/go-sql-driver/mysql v1.10.0
-	github.com/gsoultan/nextar-engine v1.2.0
-	github.com/gsoultan/nextar-engine/vendors/mysql v1.2.0
+	github.com/gsoultan/nextar v1.2.0
+	github.com/gsoultan/nextar/vendors/mysql v1.2.0
 )
 
 require (
@@ -30,6 +30,6 @@ require (
 // it. The binlog reader pulls in the TiDB parser, zap and thirty-odd other
 // modules; a consumer who only wants a MySQL connection pool should not download
 // any of them. The pool vendor stays at three.
-replace github.com/gsoultan/nextar-engine => ../../..
+replace github.com/gsoultan/nextar => ../../..
 
-replace github.com/gsoultan/nextar-engine/vendors/mysql => ..
+replace github.com/gsoultan/nextar/vendors/mysql => ..

@@ -23,8 +23,8 @@ import (
 	"time"
 
 	chdriver "github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/sqldriver"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/sqldriver"
 )
 
 // ErrInvalidConfig is returned by New when the configuration cannot be used.

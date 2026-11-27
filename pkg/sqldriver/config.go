@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // Config holds the configuration for a database/sql-backed pool.

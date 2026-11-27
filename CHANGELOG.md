@@ -47,12 +47,12 @@ reason and the migration.
 
 ### Changed
 
-- **Module path is now `github.com/gsoultan/nextar-engine`**, because the repository
-  was renamed from `gpool` to `nextar-engine`. Every module moves with it: the core,
+- **Module path is now `github.com/gsoultan/nextar`**, because the repository
+  was renamed from `gpool` to `nextar`. Every module moves with it: the core,
   `vendors/mysql`, `vendors/mysql/cdc`, `vendors/mssql`, `vendors/clickhouse`,
   `examples/gpoolproxy` and `benchmarks`. Package names do not change, so code
   still says `gpool.Pool` and `cdc.Subscriber`. Migration: replace
-  `github.com/gsoultan/gpool` with `github.com/gsoultan/nextar-engine` in imports
+  `github.com/gsoultan/gpool` with `github.com/gsoultan/nextar` in imports
   and in `go.mod`, then `go mod tidy`. Versions tagged before the rename declare
   the old path and resolve only under it; the first version under the new path
   is the next tag.
@@ -877,11 +877,11 @@ test whose comment records the original failure mode.
 - PostgreSQL is the only vendor. The abstraction has not yet been proven against a
   second one.
 
-[Unreleased]: https://github.com/gsoultan/nextar-engine/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/gsoultan/nextar-engine/compare/v1.0.1...v1.1.0
-[1.0.1]: https://github.com/gsoultan/nextar-engine/compare/v1.0.0...v1.0.1
-[1.0.0]: https://github.com/gsoultan/nextar-engine/compare/v0.5.0...v1.0.0
-[0.5.0]: https://github.com/gsoultan/nextar-engine/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/gsoultan/nextar-engine/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/gsoultan/nextar-engine/compare/v0.1.0...v0.3.0
-[0.1.0]: https://github.com/gsoultan/nextar-engine/releases/tag/v0.1.0
+[Unreleased]: https://github.com/gsoultan/nextar/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/gsoultan/nextar/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/gsoultan/nextar/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/gsoultan/nextar/compare/v0.5.0...v1.0.0
+[0.5.0]: https://github.com/gsoultan/nextar/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/gsoultan/nextar/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/gsoultan/nextar/compare/v0.1.0...v0.3.0
+[0.1.0]: https://github.com/gsoultan/nextar/releases/tag/v0.1.0

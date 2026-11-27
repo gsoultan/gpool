@@ -5,7 +5,7 @@ package pool
 import (
 	"context"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // The operations every gpool.Conn shares, on the pooled connection itself, so

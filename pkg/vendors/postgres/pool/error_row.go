@@ -3,7 +3,7 @@
 package pool
 
 import (
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // errorRow defers an acquisition or validation failure to Scan, so QueryRow can

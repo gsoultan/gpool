@@ -22,8 +22,8 @@ import (
 	"database/sql/driver"
 	"fmt"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // Pool is a connection pool over a database/sql driver, implementing gpool.Pool.

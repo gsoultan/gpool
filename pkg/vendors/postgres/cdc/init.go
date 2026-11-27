@@ -5,8 +5,8 @@ package cdc
 import (
 	"fmt"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 // init registers the PostgreSQL CDC subscriber factory. Importing this package is

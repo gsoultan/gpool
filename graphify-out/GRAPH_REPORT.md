@@ -198,7 +198,7 @@ Nodes (45): filippo/io/edwards25519, github.com/andybalholm/brotli, github.com/c
 
 ### Community 17 - "Vendor Factory And Godoc Examples"
 Cohesion: 0.10
-Nodes (39): github.com/gsoultan/nextar-engine/pkg/vendors/postgres/cdc, log, PoolFactory, SubscriberFactory, Vendor, apply(), Example_resumingFromACheckpoint(), Example_slotAdministration() (+31 more)
+Nodes (39): github.com/gsoultan/nextar/pkg/vendors/postgres/cdc, log, PoolFactory, SubscriberFactory, Vendor, apply(), Example_resumingFromACheckpoint(), Example_slotAdministration() (+31 more)
 
 ### Community 18 - "Scale And Footprint Notes"
 Cohesion: 0.08
@@ -210,11 +210,11 @@ Nodes (29): field(), splitGS2(), exchange(), T, parseServerFirst(), TestSCRAMAcc
 
 ### Community 20 - "MySQL CDC Integration Tests"
 Cohesion: 0.17
-Nodes (27): filter, target, github.com/gsoultan/nextar-engine/vendors/mysql/cdc, slices, RWMutex, normalize(), qualify(), collect() (+19 more)
+Nodes (27): filter, target, github.com/gsoultan/nextar/vendors/mysql/cdc, slices, RWMutex, normalize(), qualify(), collect() (+19 more)
 
 ### Community 21 - "Core Package Imports"
 Cohesion: 0.10
-Nodes (9): ReplicationManager, context, database/sql/driver, github.com/gsoultan/nextar-engine/pkg/gpool, github.com/gsoultan/nextar-engine/pkg/pooling, github.com/jackc/pgx/v5, Batcher, Pool (+1 more)
+Nodes (9): ReplicationManager, context, database/sql/driver, github.com/gsoultan/nextar/pkg/gpool, github.com/gsoultan/nextar/pkg/pooling, github.com/jackc/pgx/v5, Batcher, Pool (+1 more)
 
 ### Community 22 - "Pool Internals And Lifecycle"
 Cohesion: 0.10
@@ -226,15 +226,15 @@ Nodes (17): Addr, clientTLS(), Bool, CancelFunc, Config, Context, Mutex, Stat (+
 
 ### Community 24 - "SQL Server Pool Tests"
 Cohesion: 0.13
-Nodes (32): github.com/gsoultan/nextar-engine/vendors/mssql, Config, dsn(), Config, Pool, T, newPool(), scratchTable() (+24 more)
+Nodes (32): github.com/gsoultan/nextar/vendors/mssql, Config, dsn(), Config, Pool, T, newPool(), scratchTable() (+24 more)
 
 ### Community 25 - "MySQL Integration And Failure Tests"
 Cohesion: 0.16
-Nodes (33): github.com/gsoultan/nextar-engine/vendors/mysql, target, target, T, killConnections(), TestPoolRecoversAfterConnectionsAreKilled(), TestPoolReplacesItsOnlyConnectionWhenKilled(), TestPoolSurvivesRepeatedKillsUnderLoad() (+25 more)
+Nodes (33): github.com/gsoultan/nextar/vendors/mysql, target, target, T, killConnections(), TestPoolRecoversAfterConnectionsAreKilled(), TestPoolReplacesItsOnlyConnectionWhenKilled(), TestPoolSurvivesRepeatedKillsUnderLoad() (+25 more)
 
 ### Community 26 - "Vendor Config And Imports"
 Cohesion: 0.07
-Nodes (12): errors, github.com/clickhouse/clickhouse/go/v2, github.com/gsoultan/nextar-engine/pkg/sqldriver, github.com/microsoft/go/mssqldb, runtime, time, Config, Config (+4 more)
+Nodes (12): errors, github.com/clickhouse/clickhouse/go/v2, github.com/gsoultan/nextar/pkg/sqldriver, github.com/microsoft/go/mssqldb, runtime, time, Config, Config (+4 more)
 
 ### Community 27 - "Scale And Capability Benchmarks"
 Cohesion: 0.13
@@ -242,7 +242,7 @@ Nodes (26): BenchmarkGpoolAcquireRelease(), BenchmarkGpoolQueryIterator(), Bench
 
 ### Community 28 - "CDC Package Imports"
 Cohesion: 0.13
-Nodes (14): database/sql, encoding/hex, fmt, github.com/go/mysql/org/go/mysql/mysql, github.com/go/mysql/org/go/mysql/replication, github.com/go/sql/driver/mysql, github.com/gsoultan/nextar-engine/pkg/gpool/cdc, io/fs (+6 more)
+Nodes (14): database/sql, encoding/hex, fmt, github.com/go/mysql/org/go/mysql/mysql, github.com/go/mysql/org/go/mysql/replication, github.com/go/sql/driver/mysql, github.com/gsoultan/nextar/pkg/gpool/cdc, io/fs (+6 more)
 
 ### Community 29 - "Proxy Session Startup"
 Cohesion: 0.13
@@ -250,7 +250,7 @@ Nodes (9): newRelay(), cutCString(), CancelFunc, Context, Mutex, Reader, Writer,
 
 ### Community 30 - "ClickHouse Pool Tests"
 Cohesion: 0.15
-Nodes (25): Config, github.com/gsoultan/nextar-engine/vendors/clickhouse, Options, Connector, Duration, Pool, New(), newFromConfig() (+17 more)
+Nodes (25): Config, github.com/gsoultan/nextar/vendors/clickhouse, Options, Connector, Duration, Pool, New(), newFromConfig() (+17 more)
 
 ### Community 31 - "Proxy And Stream Imports"
 Cohesion: 0.15
@@ -278,7 +278,7 @@ Nodes (23): cachingURL(), connect(), Config, T, startProxy(), startProxyLimited(
 
 ### Community 37 - "SQL Server CDC Integration Tests"
 Cohesion: 0.25
-Nodes (19): github.com/gsoultan/nextar-engine/vendors/mssql/cdc, collect(), contains(), dsn(), fixture, Config, DB, Duration (+11 more)
+Nodes (19): github.com/gsoultan/nextar/vendors/mssql/cdc, collect(), contains(), dsn(), fixture, Config, DB, Duration (+11 more)
 
 ### Community 38 - "database/sql Pool Adapter"
 Cohesion: 0.15

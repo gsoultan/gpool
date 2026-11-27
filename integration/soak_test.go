@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
-	postgrescdc "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/cdc"
-	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
+	postgrescdc "github.com/gsoultan/nextar/pkg/vendors/postgres/cdc"
+	postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 
 // defaultSoakDuration keeps the default run short enough to sit in a normal test

@@ -5,9 +5,9 @@ package cdc
 import (
 	"fmt"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
-	mysqlpool "github.com/gsoultan/nextar-engine/vendors/mysql"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
+	mysqlpool "github.com/gsoultan/nextar/vendors/mysql"
 )
 
 // init registers the subscriber factory under both names the pool vendor uses.

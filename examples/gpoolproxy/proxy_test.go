@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // These tests need a real PostgreSQL. The proxy is protocol code: a unit test

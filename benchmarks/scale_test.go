@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 
 // targetClients is the client-side concurrency a pooler is expected to absorb.

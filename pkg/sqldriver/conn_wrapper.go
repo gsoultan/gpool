@@ -5,8 +5,8 @@ package sqldriver
 import (
 	"context"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // connWrapper is a checked-out connection implementing gpool.Conn.

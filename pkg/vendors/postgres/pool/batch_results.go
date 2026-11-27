@@ -7,7 +7,7 @@ import (
 
 	"github.com/gsoultan/caduceus"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // batchResults reads the replies to a pipelined batch.

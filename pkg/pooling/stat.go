@@ -5,7 +5,7 @@ package pooling
 import (
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // Stat is an immutable snapshot of pool occupancy and cumulative acquisition

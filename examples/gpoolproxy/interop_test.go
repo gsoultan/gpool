@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // The other tests drive the proxy with a client made of the proxy's own code,

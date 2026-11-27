@@ -7,7 +7,7 @@ import (
 	"database/sql/driver"
 	"sync/atomic"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // pgTx is a transaction implementing gpool.Tx.

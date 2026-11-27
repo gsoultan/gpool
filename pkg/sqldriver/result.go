@@ -5,7 +5,7 @@ package sqldriver
 import (
 	"database/sql/driver"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // pgResult is the outcome of an Exec, implementing gpool.Result.

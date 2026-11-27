@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/sqldriver"
-	"github.com/gsoultan/nextar-engine/vendors/mssql"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/sqldriver"
+	"github.com/gsoultan/nextar/vendors/mssql"
 )
 
 // dsn returns the configured DSN, skipping when none is set.

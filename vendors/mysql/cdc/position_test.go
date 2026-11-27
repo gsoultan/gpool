@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 // A position is the only durable record a MySQL consumer has of its progress,

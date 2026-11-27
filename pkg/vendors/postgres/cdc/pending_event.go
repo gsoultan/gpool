@@ -3,7 +3,7 @@
 package cdc
 
 import (
-	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 // pendingEvent is an event in flight between the reader goroutine and the

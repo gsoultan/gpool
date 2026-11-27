@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/gsoultan/caduceus/wire"
-	"github.com/gsoultan/nextar-engine/pkg/gpool"
-	"github.com/gsoultan/nextar-engine/pkg/gpool/cdc"
-	postgrespool "github.com/gsoultan/nextar-engine/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
+	postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 
 // The pool's whole reason for bounding connection lifetime is that servers go
