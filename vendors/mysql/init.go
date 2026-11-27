@@ -5,7 +5,7 @@ package mysql
 import (
 	"fmt"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // Vendor names this package registers.

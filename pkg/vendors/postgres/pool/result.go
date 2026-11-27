@@ -4,7 +4,7 @@ package pool
 
 import (
 	"github.com/gsoultan/caduceus"
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // pgResult is the outcome of an Exec, implementing gpool.Result.

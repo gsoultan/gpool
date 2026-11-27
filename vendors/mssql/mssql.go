@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/sqldriver"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/sqldriver"
 	mssqldriver "github.com/microsoft/go-mssqldb"
 )
 

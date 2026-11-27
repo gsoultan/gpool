@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 
 // scratchTable creates a table for one test and drops it afterwards.

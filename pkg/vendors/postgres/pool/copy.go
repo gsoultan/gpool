@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // Both the pool and a checked-out connection can bulk copy.

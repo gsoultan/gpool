@@ -13,7 +13,7 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	driver "github.com/go-sql-driver/mysql"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 // verifyTableSQL checks that a table exists, which is as much as MySQL can

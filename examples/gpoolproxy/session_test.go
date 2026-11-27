@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // These tests are for what the event loop made possible to get wrong. A session

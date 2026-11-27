@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gsoultan/caduceus/wire"
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // connCloseTimeout bounds the graceful close of a single connection.

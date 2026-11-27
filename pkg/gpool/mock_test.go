@@ -7,8 +7,8 @@ import (
 	"iter"
 	"sync/atomic"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 // fakePool is a gpool.Pool that only records whether it was closed.

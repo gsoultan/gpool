@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 func newTestPool(t *testing.T, connector *fakeConnector, config Config) *Pool {

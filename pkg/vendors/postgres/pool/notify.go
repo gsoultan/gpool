@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/gsoultan/caduceus"
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 var _ gpool.Notifier = (*connWrapper)(nil)

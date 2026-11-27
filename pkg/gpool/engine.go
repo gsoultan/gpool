@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 // Names under which NewEngine registers the components it is given.

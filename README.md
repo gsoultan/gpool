@@ -7,7 +7,7 @@ is no daemon, no CLI, no config file, no logger, and no process-global state.
 ## 📦 Installation
 
 ```bash
-go get github.com/gsoultan/gpool@v1.0.0
+go get github.com/gsoultan/nextar@v1.0.0
 ```
 
 While the major version is `0` the API may change in a minor release, so pin an
@@ -33,14 +33,14 @@ behaviour:
 
 | Database | Module | Driver | CDC |
 | :--- | :--- | :--- | :--- |
-| PostgreSQL | `github.com/gsoultan/gpool` | [caduceus](https://github.com/gsoultan/caduceus), pure Go | ✅ logical replication |
-| MySQL | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
-| MariaDB | `github.com/gsoultan/gpool/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
-| SQL Server | `github.com/gsoultan/gpool/vendors/mssql` | `microsoft/go-mssqldb` | ✅ change tables |
-| ClickHouse | `github.com/gsoultan/gpool/vendors/clickhouse` | `clickhouse-go/v2` | — |
+| PostgreSQL | `github.com/gsoultan/nextar` | [caduceus](https://github.com/gsoultan/caduceus), pure Go | ✅ logical replication |
+| MySQL | `github.com/gsoultan/nextar/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
+| MariaDB | `github.com/gsoultan/nextar/vendors/mysql` | `go-sql-driver/mysql` | ✅ binary log |
+| SQL Server | `github.com/gsoultan/nextar/vendors/mssql` | `microsoft/go-mssqldb` | ✅ change tables |
+| ClickHouse | `github.com/gsoultan/nextar/vendors/clickhouse` | `clickhouse-go/v2` | — |
 
 MySQL CDC is a module of its own again, nested inside the pool vendor at
-`github.com/gsoultan/gpool/vendors/mysql/cdc`: reading a binary log pulls in the
+`github.com/gsoultan/nextar/vendors/mysql/cdc`: reading a binary log pulls in the
 TiDB parser and thirty-odd other modules, and someone who only wants a
 connection pool should not download them. The pool vendor resolves 11 modules,
 the CDC one 47.
@@ -93,11 +93,11 @@ using only PostgreSQL never downloads the MySQL driver, and `govulncheck` never 
 CVE in a driver you do not import. The cost is a `go get` per vendor.
 
 ```bash
-go get github.com/gsoultan/gpool                       # PostgreSQL pool + CDC, and the interfaces
-go get github.com/gsoultan/gpool/vendors/mysql         # MySQL and MariaDB pool
-go get github.com/gsoultan/gpool/vendors/mysql/cdc     # MySQL and MariaDB CDC (binary log)
-go get github.com/gsoultan/gpool/vendors/mssql         # SQL Server
-go get github.com/gsoultan/gpool/vendors/clickhouse    # ClickHouse
+go get github.com/gsoultan/nextar                       # PostgreSQL pool + CDC, and the interfaces
+go get github.com/gsoultan/nextar/vendors/mysql         # MySQL and MariaDB pool
+go get github.com/gsoultan/nextar/vendors/mysql/cdc     # MySQL and MariaDB CDC (binary log)
+go get github.com/gsoultan/nextar/vendors/mssql         # SQL Server
+go get github.com/gsoultan/nextar/vendors/clickhouse    # ClickHouse
 ```
 
 The weight this saves is real: the core resolves 20 modules, while ClickHouse alone
@@ -111,10 +111,10 @@ vendor package is what makes `gpool.Postgres` resolvable:
 
 ```go
 import (
-    "github.com/gsoultan/gpool/pkg/gpool"
+    "github.com/gsoultan/nextar/pkg/gpool"
 
     // Registers the "postgres" pool factory.
-    postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
+    postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 ```
 
@@ -127,8 +127,8 @@ so a consumer that only reads changes can depend on `cdc.Stream` rather than the
 
 ```go
 import (
-    "github.com/gsoultan/gpool/pkg/gpool"
-    postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
+    "github.com/gsoultan/nextar/pkg/gpool"
+    postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
 )
 
 pool, err := gpool.NewPool(gpool.Postgres, postgrespool.Config{
@@ -331,8 +331,8 @@ through the same factory, and a vendor that has a pool but no CDC says so with
 
 ```go
 import (
-    "github.com/gsoultan/gpool/pkg/gpool"
-    postgrescdc "github.com/gsoultan/gpool/pkg/vendors/postgres/cdc"
+    "github.com/gsoultan/nextar/pkg/gpool"
+    postgrescdc "github.com/gsoultan/nextar/pkg/vendors/postgres/cdc"
 )
 
 subscriber, err := gpool.NewSubscriber(gpool.Postgres, postgrescdc.Config{
@@ -380,9 +380,9 @@ additionally needs ownership of the tables.
 
 ```go
 import (
-    "github.com/gsoultan/gpool/pkg/gpool"
-    mysqlpool "github.com/gsoultan/gpool/vendors/mysql"
-    mysqlcdc "github.com/gsoultan/gpool/vendors/mysql/cdc"
+    "github.com/gsoultan/nextar/pkg/gpool"
+    mysqlpool "github.com/gsoultan/nextar/vendors/mysql"
+    mysqlcdc "github.com/gsoultan/nextar/vendors/mysql/cdc"
 )
 
 subscriber, err := gpool.NewSubscriber(mysqlpool.MySQL, mysqlcdc.Config{
@@ -428,9 +428,9 @@ Requires `binlog_format=ROW` and an account with `REPLICATION SLAVE`, plus `SELE
 
 ```go
 import (
-    "github.com/gsoultan/gpool/pkg/gpool"
-    mssqlpool "github.com/gsoultan/gpool/vendors/mssql"
-    mssqlcdc "github.com/gsoultan/gpool/vendors/mssql/cdc"
+    "github.com/gsoultan/nextar/pkg/gpool"
+    mssqlpool "github.com/gsoultan/nextar/vendors/mssql"
+    mssqlcdc "github.com/gsoultan/nextar/vendors/mssql/cdc"
 )
 
 subscriber, err := gpool.NewSubscriber(mssqlpool.SQLServer, mssqlcdc.Config{
@@ -757,8 +757,8 @@ vendor names exist so calling code says which database it actually targets.
 
 ```go
 import (
-    "github.com/gsoultan/gpool/pkg/gpool"
-    "github.com/gsoultan/gpool/vendors/mysql"
+    "github.com/gsoultan/nextar/pkg/gpool"
+    "github.com/gsoultan/nextar/vendors/mysql"
 )
 
 pool, err := mysql.New(mysql.Config{
@@ -809,7 +809,7 @@ Both follow the same shape as MySQL — a DSN plus the pooling knobs, registered
 their own vendor name.
 
 ```go
-import "github.com/gsoultan/gpool/vendors/mssql"
+import "github.com/gsoultan/nextar/vendors/mssql"
 
 pool, err := mssql.New(mssql.Config{
     // The ADO form, server=host;user id=...;, is accepted too.
@@ -821,7 +821,7 @@ pool, err := mssql.New(mssql.Config{
 SQL Server uses `@p1`-style ordinal placeholders rather than `?` or `$1`.
 
 ```go
-import "github.com/gsoultan/gpool/vendors/clickhouse"
+import "github.com/gsoultan/nextar/vendors/clickhouse"
 
 pool, err := clickhouse.New(clickhouse.Config{
     DSN:      "clickhouse://default:pass@localhost:9000/analytics",

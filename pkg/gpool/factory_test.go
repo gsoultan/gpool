@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 func TestRegisterAndCreatePool(t *testing.T) {

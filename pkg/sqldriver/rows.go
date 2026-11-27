@@ -9,7 +9,7 @@ import (
 	"iter"
 	"sync/atomic"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 // pgRows is a result set implementing gpool.Rows.

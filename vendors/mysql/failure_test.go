@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/vendors/mysql"
+	"github.com/gsoultan/nextar/vendors/mysql"
 )
 
 // The PostgreSQL suite proves the pgx path recovers from a failover. This proves

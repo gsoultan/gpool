@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
 )
 
 // captureInstance is one table SQL Server is capturing, and the instance that

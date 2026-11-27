@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/gpool/cdc"
-	mssqlpool "github.com/gsoultan/gpool/vendors/mssql"
-	mssqlcdc "github.com/gsoultan/gpool/vendors/mssql/cdc"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool/cdc"
+	mssqlpool "github.com/gsoultan/nextar/vendors/mssql"
+	mssqlcdc "github.com/gsoultan/nextar/vendors/mssql/cdc"
 )
 
 // These tests need SQL Server with change data capture available, which means a

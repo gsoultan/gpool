@@ -1,4 +1,4 @@
-module github.com/gsoultan/gpool
+module github.com/gsoultan/nextar
 
 go 1.27.4
 

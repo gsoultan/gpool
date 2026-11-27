@@ -190,9 +190,9 @@ jobs:
           import (
               "fmt"
 
-              "github.com/gsoultan/gpool/pkg/gpool"
-              "github.com/gsoultan/gpool/pkg/gpool/cdc"
-              postgrespool "github.com/gsoultan/gpool/pkg/vendors/postgres/pool"
+              "github.com/gsoultan/nextar/pkg/gpool"
+              "github.com/gsoultan/nextar/pkg/gpool/cdc"
+              postgrespool "github.com/gsoultan/nextar/pkg/vendors/postgres/pool"
           )
 
           func main() {
@@ -201,7 +201,7 @@ jobs:
               fmt.Println(e.Position, e.Transaction, e.Timestamp)
           }
           EOF
-          GOFLAGS=-mod=mod go get "github.com/gsoultan/gpool@${version}"
+          GOFLAGS=-mod=mod go get "github.com/gsoultan/nextar@${version}"
           go mod tidy
           go build ./...
           echo "installable at ${version}"

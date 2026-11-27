@@ -5,8 +5,8 @@ package pool
 import (
 	"context"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // Postgres is a connection pool for PostgreSQL implementing gpool.Pool.

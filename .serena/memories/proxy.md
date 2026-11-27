@@ -6,7 +6,7 @@ other thirty-nine services, so forty holding twenty-five each still open a
 thousand. Closing that needs a process.
 
 Not part of the library and never downloaded by a consumer of
-`github.com/gsoultan/gpool`. That is what keeps "gpool is a library only" true
+`github.com/gsoultan/nextar`. That is what keeps "gpool is a library only" true
 while still answering the question.
 
 ## It is the generality proof for pkg/pooling

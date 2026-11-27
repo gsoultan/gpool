@@ -5,7 +5,7 @@ package pool
 import (
 	"context"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/gpool"
 )
 
 var _ gpool.Batcher = (*connWrapper)(nil)

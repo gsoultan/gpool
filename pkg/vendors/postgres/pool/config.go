@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gsoultan/caduceus/wire"
-	"github.com/gsoultan/gpool/pkg/gpool"
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 // Defaults applied by Config.withDefaults for any field left at its zero value.

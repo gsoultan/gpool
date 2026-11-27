@@ -5,9 +5,9 @@ package cdc
 import (
 	"fmt"
 
-	"github.com/gsoultan/gpool/pkg/gpool"
-	gpoolcdc "github.com/gsoultan/gpool/pkg/gpool/cdc"
-	mssqlpool "github.com/gsoultan/gpool/vendors/mssql"
+	"github.com/gsoultan/nextar/pkg/gpool"
+	gpoolcdc "github.com/gsoultan/nextar/pkg/gpool/cdc"
+	mssqlpool "github.com/gsoultan/nextar/vendors/mssql"
 )
 
 // init registers the subscriber factory. Importing this package is what makes

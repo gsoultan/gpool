@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 const (

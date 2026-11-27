@@ -1,10 +1,10 @@
-module github.com/gsoultan/gpool/vendors/clickhouse
+module github.com/gsoultan/nextar/vendors/clickhouse
 
 go 1.27.4
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
-	github.com/gsoultan/gpool v1.0.1
+	github.com/gsoultan/nextar v1.2.0
 )
 
 require (
@@ -27,4 +27,4 @@ require (
 // The vendor module tracks the core from the same commit during development.
 // A replace directive in a dependency is ignored by consumers, so this only
 // affects building and testing this module in place.
-replace github.com/gsoultan/gpool => ../..
+replace github.com/gsoultan/nextar => ../..

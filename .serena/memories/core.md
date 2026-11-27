@@ -1,7 +1,7 @@
 # Gpool Core
 
 Graph root. Library-only Go module for database connection pooling, with CDC for
-PostgreSQL. Module path `github.com/gsoultan/gpool`. No binary, no config file, no
+PostgreSQL. Module path `github.com/gsoultan/nextar`. No binary, no config file, no
 logger, no metrics server, no process-global mutable state beyond the vendor
 registry.
 

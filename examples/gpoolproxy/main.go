@@ -27,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gsoultan/gpool/pkg/pooling"
+	"github.com/gsoultan/nextar/pkg/pooling"
 )
 
 func main() {
