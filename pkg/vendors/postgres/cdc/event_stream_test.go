@@ -59,14 +59,16 @@ func TestCatchUpAdvancesOnlyWhenDrained(t *testing.T) {
 	tests := []struct {
 		name        string
 		buffered    int
-		lastPushed  uint64
+		pushed      uint64
+		acked       uint64
 		flushed     uint64
 		serverEnd   uint64
 		wantFlushed uint64
 	}{
 		{
 			name:        "fully drained, catches up to the server",
-			lastPushed:  100,
+			pushed:      1,
+			acked:       1,
 			flushed:     100,
 			serverEnd:   500,
 			wantFlushed: 500,
@@ -74,29 +76,30 @@ func TestCatchUpAdvancesOnlyWhenDrained(t *testing.T) {
 		{
 			name:        "events still buffered",
 			buffered:    1,
-			lastPushed:  100,
+			pushed:      2,
+			acked:       1,
 			flushed:     100,
 			serverEnd:   500,
 			wantFlushed: 100,
 		},
 		{
 			name:        "consumer has not acknowledged the last event",
-			lastPushed:  100,
+			pushed:      2,
+			acked:       1,
 			flushed:     50,
 			serverEnd:   500,
 			wantFlushed: 50,
 		},
 		{
 			name:        "server is behind the confirmed position",
-			lastPushed:  500,
+			pushed:      1,
+			acked:       1,
 			flushed:     500,
 			serverEnd:   400,
 			wantFlushed: 500,
 		},
 		{
 			name:        "idle from the start",
-			lastPushed:  0,
-			flushed:     0,
 			serverEnd:   900,
 			wantFlushed: 900,
 		},
@@ -110,7 +113,8 @@ func TestCatchUpAdvancesOnlyWhenDrained(t *testing.T) {
 			for range tt.buffered {
 				s.events <- pendingEvent{}
 			}
-			s.lastPushed.Store(tt.lastPushed)
+			s.pushed.Store(tt.pushed)
+			s.acked.Store(tt.acked)
 			s.flushed.Store(tt.flushed)
 
 			s.catchUp(tt.serverEnd)
@@ -122,14 +126,13 @@ func TestCatchUpAdvancesOnlyWhenDrained(t *testing.T) {
 	}
 }
 
-// catchUp keeps lastPushed and flushed equal so a following idle period can keep
-// advancing rather than latching at the position of the last event.
-func TestCatchUpKeepsPositionsAligned(t *testing.T) {
+// A following idle period must keep advancing rather than latching at the
+// position of the last event.
+func TestCatchUpKeepsAdvancingAcrossIdlePeriods(t *testing.T) {
 	t.Parallel()
 
 	s := &pgEventStream{events: make(chan pendingEvent, 4)}
-	s.lastPushed.Store(100)
-	s.flushed.Store(100)
+	deliver(s, 100)
 
 	s.catchUp(500)
 	s.catchUp(900)
@@ -137,6 +140,57 @@ func TestCatchUpKeepsPositionsAligned(t *testing.T) {
 	if got := s.flushed.Load(); got != 900 {
 		t.Fatalf("flushed = %d, want 900 after a second idle period", got)
 	}
+}
+
+// pgoutput sends transactions in commit order, but each change carries the LSN
+// of its own record. T1 writes at 60 and commits last; T2 writes at 90 and
+// commits first; so T2's change is delivered before T1's lower-positioned one.
+//
+// catchUp used to require the last pushed position (60) to equal the confirmed
+// one (90, a maximum). After an interleave they never matched again, so a quiet
+// publication stopped confirming the server's WAL end and pinned WAL on the
+// primary until the next published change.
+func TestCatchUpAdvancesAfterInterleavedTransactions(t *testing.T) {
+	t.Parallel()
+
+	s := &pgEventStream{events: make(chan pendingEvent, 4)}
+	deliver(s, 90) // T2, committed first
+	deliver(s, 60) // T1, written first
+
+	s.catchUp(500)
+
+	if got := s.flushed.Load(); got != 500 {
+		t.Fatalf("flushed = %d, want 500: the slot is pinned after interleaved transactions", got)
+	}
+}
+
+// The tempting fix for the interleave — comparing against the highest pushed
+// position — would lose data. With T1's lower-positioned change still inside the
+// consumer's loop body, the highest pushed and the confirmed position are both
+// T2's, and confirming the server's end would skip T1 on restart. Only a count
+// knows that an event is still outstanding.
+func TestCatchUpWaitsForALowerPositionedEventInFlight(t *testing.T) {
+	t.Parallel()
+
+	s := &pgEventStream{events: make(chan pendingEvent, 4)}
+	deliver(s, 90)
+
+	// T1's change has left the channel but its loop body has not returned.
+	s.pushed.Add(1)
+
+	s.catchUp(500)
+
+	if got := s.flushed.Load(); got != 90 {
+		t.Fatalf("flushed = %d, want 90 while an event is still being processed", got)
+	}
+}
+
+// deliver records one event as pushed by the reader and fully processed by the
+// consumer, in the order emit and All do it.
+func deliver(s *pgEventStream, lsn uint64) {
+	s.pushed.Add(1)
+	advance(&s.flushed, lsn)
+	s.acked.Add(1)
 }
 
 func TestStreamErrRecordsTheFirstFailure(t *testing.T) {
