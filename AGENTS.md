@@ -80,8 +80,9 @@ pglogrepl appear only in `benchmarks/`, as what gpool is measured against).
   `wire`, `codec`, `replication`, and the `Conn` that runs queries. gpool's
   PostgreSQL vendors are adapters over it and hold only what pooling needs:
   liveness, reset, the `gpool` interfaces. A protocol or decoding fix goes to
-  caduceus, then gpool bumps the version. caduceus must stay free of
-  `database/sql`, pgx and pglogrepl, which are its competitors; gpool bridges
+  caduceus, then gpool bumps the version. caduceus must stay free of pgx and
+  pglogrepl, which are its competitors. Its `stdlib` package is a
+  `database/sql` driver of its own; gpool does not import it, and bridges
   `driver.Valuer` arguments itself (`bindable`).
 - Several databases means several pools, registered by name on the `Engine`, sharing
   nothing. Never multiplex databases through one pool: separate capacity is what

@@ -47,6 +47,15 @@ reason and the migration.
 
 ### Changed
 
+- **caduceus is now v0.2.0.** It adds SASLprep for SCRAM passwords, OAuth
+  (`OAUTHBEARER`), GSSAPI encryption, `BASE_BACKUP`, and the rest of libpq's
+  connection keywords (`hostaddr`, keepalives, `tcp_user_timeout`,
+  `load_balance_hosts`, `requirepeer`, `sslcrl`, `sslcertmode`,
+  `ssl_min_protocol_version` and the others), which used to reach the server
+  and be refused there. Its cancel requests now go through `DialFunc`, so a
+  pool dialling through a tunnel or proxy can cancel a query. Nothing in
+  gpool's API changes.
+
 - **Module path is now `github.com/gsoultan/nextar`**, because the repository
   was renamed from `gpool` to `nextar`. Every module moves with it: the core,
   `vendors/mysql`, `vendors/mysql/cdc`, `vendors/mssql`, `vendors/clickhouse`,
