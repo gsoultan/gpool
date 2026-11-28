@@ -3,7 +3,7 @@ module github.com/gsoultan/nextar/benchmarks
 go 1.27.4
 
 require (
-	github.com/gsoultan/caduceus v0.1.0
+	github.com/gsoultan/caduceus v0.2.0
 	// pgx and pglogrepl are here, and only here, as the libraries gpool is measured
 	// against. gpool itself depends on neither, and a consumer of gpool never
 	// downloads this module.
